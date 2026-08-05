@@ -10,6 +10,7 @@
   :components ((:module "src"
                 :serial t
                 :components ((:file "packages")
+                             (:file "listener-dispatch")
                              (:file "legacy-paths")
                              (:file "message")
                              (:file "session")
@@ -66,6 +67,7 @@
   :components ((:module "tests"
                 :serial t
                  :components ((:file "packages")
+                              (:file "listener-dispatch-test")
                               (:file "legacy-path-test")
                               (:file "migration-integration-test")
                               (:file "package-manager-test")

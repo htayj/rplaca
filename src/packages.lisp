@@ -290,6 +290,9 @@
    #:buffer-finalize-input
 
    ;; Listener buffers
+   #:classify-listener-line
+   #:next-listener-input-mode
+   #:listener-prompt-string
    #:listener-state
    #:make-listener-state
    #:listener-state-package-name
