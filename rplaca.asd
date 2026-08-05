@@ -55,6 +55,7 @@
                              (:file "crash-report")
                              (:file "crash-report-sbcl")
                              (:file "main")
+                             (:file "listener-commands")
                              (:file "mcclim-interface")
                              (:file "reference")
                              (:file "sexed")

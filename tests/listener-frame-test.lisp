@@ -848,3 +848,170 @@ McCLIM layout-switch path that clears frame-panes-for-layout and rebuilds)."
                  (inter-b (cdr (assoc 'rplaca::interactor panes-b :test #'eq))))
             (is (not (eq inter-a inter-b))
                 "two frames must not share the interactor pane object"))))))
+
+;;; ===========================================================================
+;;; Todo 6: read-frame-command dispatch, hidden no-op/error commands, shell.
+;;; ===========================================================================
+
+(defun make-token (kind &key (value nil) (source ""))
+  (rplaca::make-listener-input-token :kind kind :value value :source source))
+
+(defun make-cmd-frame ()
+  (let ((rplaca::*package-appearance-catalog* (rplaca::make-classic-appearance-catalog)))
+    (clim:make-application-frame
+     'rplaca::rplaca-listener
+     :conversation-buffer (make-test-conversation-buffer)
+     :appearance-profile (rplaca::make-appearance-profile)
+     :listener-context (rplaca::make-listener-context))))
+
+(test listener-token-maps-form-to-com-eval
+  (let ((result (rplaca::listener-token->command
+                 (make-token :form :value '(+ 1 2) :source "(+ 1 2)")
+                 (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-eval (+ 1 2) "(+ 1 2)") result))))
+
+(test listener-token-maps-eval-form-to-com-eval
+  (let ((result (rplaca::listener-token->command
+                 (make-token :eval-form :value '(+ 1 2) :source "(+ 1 2)")
+                 (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-eval (+ 1 2) "(+ 1 2)") result))))
+
+(test listener-token-maps-prose-to-com-say
+  (let ((result (rplaca::listener-token->command
+                 (make-token :prose :value "hi" :source "hi")
+                 (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-say "hi") result))))
+
+(test listener-token-maps-enter-say-to-com-set-input-mode
+  (let ((result (rplaca::listener-token->command
+                 (make-token :enter-say) (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-set-input-mode :say) result))))
+
+(test listener-token-maps-exit-say-to-com-set-input-mode
+  (let ((result (rplaca::listener-token->command
+                 (make-token :exit-say) (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-set-input-mode :eval) result))))
+
+(test listener-token-maps-shell-to-com-run-shell
+  (let ((result (rplaca::listener-token->command
+                 (make-token :shell :value "ls" :source "ls")
+                 (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-run-shell "ls") result))))
+
+(test listener-token-maps-no-op-to-com-no-op
+  (let ((result (rplaca::listener-token->command
+                 (make-token :no-op) (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-no-op) result))))
+
+(test listener-token-maps-error-to-com-report-input-error
+  (let ((result (rplaca::listener-token->command
+                 (make-token :error :value "did you mean ,Command?")
+                 (make-cmd-frame) nil)))
+    (is (equal '(rplaca::com-report-input-error "did you mean ,Command?") result))))
+
+(test listener-token-maps-command-via-ensure-complete-command
+  (let* ((frame (make-cmd-frame))
+         (result (rplaca::listener-token->command
+                  (make-token :command :value '(rplaca::com-listener-fixture-pong))
+                  frame nil)))
+    (is (equal '(rplaca::com-listener-fixture-pong) result))))
+
+(test listener-token-unknown-kind-signals
+  (signals error
+    (rplaca::listener-token->command
+     (make-token :bogus) (make-cmd-frame) nil)))
+
+(test com-no-op-returns-normally-without-output
+  (let ((frame (make-cmd-frame))
+        (output (make-string-output-stream)))
+    (with-listener-function-override
+        (clim:frame-standard-output (f) (declare (ignore f)) output)
+      (let ((clim:*application-frame* frame))
+        (is (null (rplaca::com-no-op)))))
+    (is (string= "" (get-output-stream-string output)))))
+
+(test com-report-input-error-writes-hint-to-interactor
+  (let ((frame (make-cmd-frame))
+        (output (make-string-output-stream)))
+    (with-listener-function-override
+        (clim:frame-standard-output (f) (declare (ignore f)) output)
+      (let ((clim:*application-frame* frame))
+        (rplaca::com-report-input-error "did you mean ,Command?")))
+    (is (search "did you mean" (get-output-stream-string output)))))
+
+(test com-run-shell-invokes-shell-helper-and-writes-output
+  (let ((frame (make-cmd-frame))
+        (output (make-string-output-stream))
+        (called nil))
+    (with-listener-function-override
+        (clim:frame-standard-output (f) (declare (ignore f)) output)
+      (with-listener-function-override
+          (rplaca::run-listener-shell-command (command directory &key &allow-other-keys)
+            (setf called (list command directory))
+            '(:exit-code 0 :stdout "shell-out" :stderr "" :stdout-truncated-p nil))
+        (let ((clim:*application-frame* frame))
+          (rplaca::com-run-shell "echo hi"))))
+    (is (equal '("echo hi") (subseq called 0 1)))
+    (is (search "shell-out" (get-output-stream-string output)))))
+
+(test com-run-shell-reports-nonzero-exit
+  (let ((frame (make-cmd-frame))
+        (output (make-string-output-stream)))
+    (with-listener-function-override
+        (clim:frame-standard-output (f) (declare (ignore f)) output)
+      (with-listener-function-override
+          (rplaca::run-listener-shell-command (&rest args)
+            (declare (ignore args))
+            '(:exit-code 7 :stdout "" :stderr "bad" :stdout-truncated-p nil))
+        (let ((clim:*application-frame* frame))
+          (rplaca::com-run-shell "false"))))
+    (let ((text (get-output-stream-string output)))
+      (is (search "bad" text))
+      (is (search "[exit 7]" text)))))
+
+(test com-set-input-mode-updates-frame-context
+  (let ((frame (make-cmd-frame)))
+    (is (eq :eval (rplaca::listener-context-input-mode
+                   (rplaca::rplaca-listener-context frame))))
+    (let ((clim:*application-frame* frame))
+      (rplaca::com-set-input-mode :say))
+    (is (eq :say (rplaca::listener-context-input-mode
+                  (rplaca::rplaca-listener-context frame))))))
+
+(test read-frame-command-is-defined-for-rplaca-listener
+  (is (fboundp 'rplaca::listener-token->command)))
+
+;;; ===========================================================================
+;;; Todo-6 fix: com-run-shell must use conversation-buffer working directory,
+;;; not directory-stack history or process cwd.
+;;; ===========================================================================
+
+(test com-run-shell-uses-conversation-buffer-working-directory
+  "The shell helper receives the conversation buffer's working directory even
+when it differs from both the directory-stack top and the process cwd."
+  (let* ((dir-a (ensure-directories-exist #P"/tmp/rplaca-6-cwd-A/"))
+         (dir-b (ensure-directories-exist #P"/tmp/rplaca-6-cwd-B/"))
+         (process-cwd (truename "."))
+         (buf (rplaca::make-buffer "shell-cwd-test"
+                                   :working-directory dir-a
+                                   :kind :chat
+                                   :session-persistence-mode :persistent
+                                   :session nil))
+         (frame (clim:make-application-frame
+                 'rplaca::rplaca-listener
+                 :conversation-buffer buf
+                 :listener-context (rplaca::listener-context-push-directory
+                                    (rplaca::make-listener-context) dir-b)))
+         (received-dir nil))
+    (is (not (equal dir-a dir-b)))
+    (is (not (equal dir-a process-cwd)))
+    (with-listener-function-override
+        (rplaca::run-listener-shell-command (command directory &key &allow-other-keys)
+          (setf received-dir directory)
+          '(:exit-code 0 :stdout "" :stderr "" :stdout-truncated-p nil))
+      (let ((clim:*application-frame* frame))
+        (rplaca::com-run-shell "echo test")))
+    (is (equal dir-a (uiop:pathname-directory-pathname received-dir))
+        "shell helper must receive the buffer's working directory A, not ~
+         directory-stack B (~A) or process cwd (~A)"
+        dir-b process-cwd)))
