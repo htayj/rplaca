@@ -323,6 +323,41 @@
     #:rplaca-package
     #:prose
     #:command-form-or-prose
+    ;; Listener frame, details surface, lifecycle
+    #:rplaca-listener-conversation-buffer
+    #:rplaca-listener-pending-session-name
+    #:rplaca-listener-session-label
+    #:rplaca-listener-appearance-profile
+    #:rplaca-listener-pending-assistant-turn
+    #:rplaca-listener-selected-detail
+    #:rplaca-listener-liveness
+    #:rplaca-listener-progress
+    #:set-rplaca-listener-selected-detail
+    #:clear-rplaca-listener-selected-detail
+    #:assistant-turn
+    #:make-assistant-turn
+    #:assistant-turn-primary-text
+    #:assistant-turn-tool-uses
+    #:assistant-turn-reasoning
+    #:assistant-turn-metadata
+    #:assistant-turn-artifact-refs
+    #:assistant-turn-media-refs
+    #:assistant-turn-inspect-payload
+    #:assistant-turn-status
+    #:turn-facet
+    #:make-turn-facet
+    #:turn-facet-turn
+    #:turn-facet-kind
+    #:display-turn-details
+    #:display-listener-wholine
+    #:listener-print-prompt
+    #:listener-frame-top-level
+    #:listener-frame-cleanup
+    #:rplaca-listener-pane-appearance-snapshot
+    #:listener-resolve-pane-appearance-initargs
+    #:listener-pane-appearance-initargs
+    #:make-rplaca-listener-pane
+    #:run-rplaca-listener
    #:listener-state
    #:make-listener-state
    #:listener-state-package-name

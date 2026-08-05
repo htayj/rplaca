@@ -3180,12 +3180,18 @@ Environment variables:
 
 (defun make-initial-chat-buffer (session-name agent-name
                                    &key (working-directory (truename ".")))
-  "Create and register the initial interactive chat buffer."
-  (let ((buf (make-chat-buffer session-name
-                               :agent-name agent-name
-                               :working-directory working-directory
-                               :session-persistence-mode :persistent
-                               :add-to-ring-p t)))
+  "Create and register the eager sessionless conversation buffer.
+
+The buffer is persistent-mode but sessionless: no session is attached until the
+first say (todo 11), so autosave is a harmless no-op.  Display defaults, ring,
+hooks, and the system-prompt header are initialized here."
+  (let ((buf (make-buffer session-name
+                          :agent-name agent-name
+                          :working-directory working-directory
+                          :kind :chat
+                          :session-persistence-mode :persistent)))
+    (initialize-buffer-display-defaults buf)
+    (add-buffer-to-ring buf)
     (run-hook-with-args '*initial-buffer-hook* buf)
     (sync-buffer-system-prompt-display buf)
     (autosave-session-snapshot buf)
@@ -3822,8 +3828,9 @@ This function exits the Lisp image with status 0 on success and 1 on errors."
          ;; package registration and init.lisp have completed, while prompt
          ;; entry points never reach this GUI-only boundary.
          (let ((appearance-profile (resolve-startup-appearance-profile)))
-           (funcall (symbol-function 'run-rplaca-chat-frame)
+           (funcall (symbol-function 'run-rplaca-listener)
                     buf
+                    :pending-session-name session-name
                     :window-title window-title
                     :appearance-profile appearance-profile)))
        (publish-crash-report-runtime-snapshot :phase :stopped)
