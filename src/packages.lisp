@@ -293,6 +293,10 @@
    #:classify-listener-line
    #:next-listener-input-mode
    #:listener-prompt-string
+   #:expand-prose-interpolations
+   #:prose-interpolation-error
+   #:prose-interpolation-error-substring
+   #:prose-interpolation-error-cause
    #:listener-state
    #:make-listener-state
    #:listener-state-package-name
