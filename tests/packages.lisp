@@ -10,6 +10,10 @@
   :description "Listener line dispatch specification tests"
   :in rplaca-suite)
 
+(def-suite listener-commands-core-suite
+  :description "Listener context and UI-independent command helper tests"
+  :in rplaca-suite)
+
 (def-suite legacy-path-suite
   :description "Legacy path migration tests"
   :in rplaca-suite)

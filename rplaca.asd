@@ -44,6 +44,7 @@
                              (:file "subagents")
                              (:file "compaction")
                              (:file "prompt-runner")
+                             (:file "listener-commands-core")
                              (:file "pipelines")
                              (:file "info")
                              (:file "minibuffer")
@@ -68,6 +69,7 @@
                 :serial t
                  :components ((:file "packages")
                               (:file "listener-dispatch-test")
+                              (:file "listener-commands-core-test")
                               (:file "legacy-path-test")
                               (:file "migration-integration-test")
                               (:file "package-manager-test")

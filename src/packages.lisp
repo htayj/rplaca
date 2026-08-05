@@ -297,6 +297,19 @@
    #:prose-interpolation-error
    #:prose-interpolation-error-substring
    #:prose-interpolation-error-cause
+   #:listener-context
+   #:make-listener-context
+   #:listener-context-package-name
+   #:listener-context-directory-stack
+   #:listener-context-input-mode
+   #:listener-context-push-directory
+   #:listener-context-pop-directory
+   #:listener-context-set-package
+   #:listener-context-set-input-mode
+   #:unknown-listener-package
+   #:unknown-listener-package-name
+   #:empty-listener-directory-stack
+   #:run-listener-shell-command
    #:listener-state
    #:make-listener-state
    #:listener-state-package-name
