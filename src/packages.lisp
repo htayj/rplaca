@@ -297,19 +297,32 @@
    #:prose-interpolation-error
    #:prose-interpolation-error-substring
    #:prose-interpolation-error-cause
-   #:listener-context
-   #:make-listener-context
-   #:listener-context-package-name
-   #:listener-context-directory-stack
-   #:listener-context-input-mode
-   #:listener-context-push-directory
-   #:listener-context-pop-directory
-   #:listener-context-set-package
-   #:listener-context-set-input-mode
-   #:unknown-listener-package
-   #:unknown-listener-package-name
-   #:empty-listener-directory-stack
-   #:run-listener-shell-command
+    #:listener-context
+    #:make-listener-context
+    #:listener-context-package-name
+    #:listener-context-directory-stack
+    #:listener-context-input-mode
+    #:listener-context-push-directory
+    #:listener-context-pop-directory
+    #:listener-context-set-package
+    #:listener-context-set-input-mode
+    #:unknown-listener-package
+    #:unknown-listener-package-name
+    #:empty-listener-directory-stack
+    #:run-listener-shell-command
+    ;; Listener frame fixture and delegated presentation acceptance
+    #:*listener-input-mode*
+    #:rplaca-listener
+    #:rplaca-listener-context
+    #:define-rplaca-listener-command
+    #:listener-input-token
+    #:make-listener-input-token
+    #:listener-input-token-kind
+    #:listener-input-token-value
+    #:listener-input-token-source
+    #:rplaca-package
+    #:prose
+    #:command-form-or-prose
    #:listener-state
    #:make-listener-state
    #:listener-state-package-name

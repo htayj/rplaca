@@ -14,6 +14,10 @@
   :description "Listener context and UI-independent command helper tests"
   :in rplaca-suite)
 
+(def-suite listener-frame-suite
+  :description "Listener frame fixture and delegated presentation acceptance tests"
+  :in rplaca-suite)
+
 (def-suite legacy-path-suite
   :description "Legacy path migration tests"
   :in rplaca-suite)
