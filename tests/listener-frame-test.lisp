@@ -366,32 +366,33 @@ declaration (test-only introspection of McCLIM layout metadata)."
 
 (test rplaca-listener-frame-has-single-interactor-and-detail-panes
   (let ((frame (make-test-listener-frame*
-                :conversation-buffer (make-test-conversation-buffer))))
-    (is (find 'rplaca::interactor
+                 :conversation-buffer (make-test-conversation-buffer))))
+    (is (find 'rplaca::interactor-container
               (listener-layout-pane-names frame 'rplaca::listener-only)))
-    (is (find 'rplaca::pointer-doc
+    (is (find 'rplaca::pointer-doc-container
               (listener-layout-pane-names frame 'rplaca::listener-only)))
-    (is (find 'rplaca::wholine
+    (is (find 'rplaca::wholine-container
               (listener-layout-pane-names frame 'rplaca::listener-only)))))
 
 (test rplaca-listener-default-layout-excludes-details
   (let ((frame (make-test-listener-frame*
-                :conversation-buffer (make-test-conversation-buffer))))
+                 :conversation-buffer (make-test-conversation-buffer))))
     (is (eq 'rplaca::listener-only (clim:frame-current-layout frame)))
-    (is (not (find 'rplaca::details
+    (is (not (find 'rplaca::details-container
                    (listener-layout-pane-names frame 'rplaca::listener-only))))
-    (is (find 'rplaca::details
+    (is (find 'rplaca::details-container
               (listener-layout-pane-names frame 'rplaca::listener+details)))
     ;; listener+details reuses the same interactor/pointer-doc/wholine.
-    (dolist (pane '(rplaca::interactor rplaca::pointer-doc rplaca::wholine))
+    (dolist (pane '(rplaca::interactor-container rplaca::pointer-doc-container
+                                      rplaca::wholine-container))
       (is (find pane (listener-layout-pane-names frame 'rplaca::listener+details))))))
 
 (test rplaca-listener-standard-and-error-output-always-map-to-interactor
   (let ((frame (make-test-listener-frame*
-                :conversation-buffer (make-test-conversation-buffer)))
+                 :conversation-buffer (make-test-conversation-buffer)))
         (sentinel-interactor (cons :sentinel nil)))
     (with-listener-function-override
-        (clim:find-pane-named (requested-frame pane-name)
+        (clim:get-frame-pane (requested-frame pane-name)
           (if (and (eq requested-frame frame)
                    (eq pane-name 'rplaca::interactor))
               sentinel-interactor
@@ -814,13 +815,13 @@ McCLIM layout-switch path that clears frame-panes-for-layout and rebuilds)."
         (lambda (make-count)
           ;; First generation: factory creates panes.
           (let* ((panes-1 (call-pane-constructor frame))
-                 (inter-1 (cdr (assoc 'rplaca::interactor panes-1 :test #'eq))))
+                 (inter-1 (cdr (assoc 'rplaca::interactor-container panes-1 :test #'eq))))
             (is-true inter-1)
             ;; Simulate layout switch: McCLIM clears frame-panes-for-layout.
             (setf (clim-internals::frame-panes-for-layout frame) nil)
             ;; Second generation: factory must return the SAME pane objects.
             (let* ((panes-2 (call-pane-constructor frame))
-                   (inter-2 (cdr (assoc 'rplaca::interactor panes-2 :test #'eq))))
+                   (inter-2 (cdr (assoc 'rplaca::interactor-container panes-2 :test #'eq))))
               (is (eq inter-1 inter-2)
                   "interactor identity must persist across regeneration")
               (dolist (name '(rplaca::interactor rplaca::pointer-doc
@@ -844,8 +845,8 @@ McCLIM layout-switch path that clears frame-panes-for-layout and rebuilds)."
         (lambda (make-count)
           (let* ((panes-a (call-pane-constructor frame-a))
                  (panes-b (call-pane-constructor frame-b))
-                 (inter-a (cdr (assoc 'rplaca::interactor panes-a :test #'eq)))
-                 (inter-b (cdr (assoc 'rplaca::interactor panes-b :test #'eq))))
+                 (inter-a (cdr (assoc 'rplaca::interactor-container panes-a :test #'eq)))
+                 (inter-b (cdr (assoc 'rplaca::interactor-container panes-b :test #'eq))))
             (is (not (eq inter-a inter-b))
                 "two frames must not share the interactor pane object"))))))
 
@@ -1015,3 +1016,481 @@ when it differs from both the directory-stack top and the process cwd."
         "shell helper must receive the buffer's working directory A, not ~
          directory-stack B (~A) or process cwd (~A)"
         dir-b process-cwd)))
+
+;;; ===========================================================================
+;;; Todo 7 restored+new tests: com-eval behavioral coverage + graft regressions.
+;;; ===========================================================================
+
+(defun make-eval-frame ()
+  (let ((rplaca::*package-appearance-catalog* (rplaca::make-classic-appearance-catalog)))
+    (clim:make-application-frame
+     'rplaca::rplaca-listener
+     :conversation-buffer (make-test-conversation-buffer)
+     :appearance-profile (rplaca::make-appearance-profile)
+     :listener-context (rplaca::make-listener-context))))
+
+(defun eval-with-stubbed-output (frame form &optional source-text)
+  "Call com-eval with frame-standard-output stubbed to a string stream."
+  (let ((output (make-string-output-stream)))
+    (with-listener-function-override
+        (clim:frame-standard-output (f) (declare (ignore f)) output)
+      (let ((clim:*application-frame* frame))
+        (rplaca::com-eval form (or source-text (princ-to-string form)))))
+    (get-output-stream-string output)))
+
+(defun listener-count-substring (needle haystack)
+  (loop :with count = 0
+        :with start = 0
+        :for position = (search needle haystack :start2 start)
+        :while position
+        :do (incf count)
+            (setf start (+ position (length needle)))
+        :finally (return count)))
+
+(defmacro with-temporary-com-say ((lambda-list &body implementation) &body body)
+  (let ((existed-p (gensym "EXISTED-P"))
+        (original (gensym "ORIGINAL")))
+    `(let ((,existed-p (fboundp 'rplaca::com-say))
+           (,original (and (fboundp 'rplaca::com-say)
+                           (symbol-function 'rplaca::com-say))))
+       (unwind-protect
+            (progn
+              (setf (symbol-function 'rplaca::com-say)
+                    (lambda ,lambda-list ,@implementation))
+              ,@body)
+         (if ,existed-p
+             (setf (symbol-function 'rplaca::com-say) ,original)
+             (fmakunbound 'rplaca::com-say))))))
+
+(defun invoke-ask-agent-from-debugger (condition old-hook)
+  (declare (ignore condition old-hook))
+  (invoke-restart (or (find-restart 'rplaca::ask-agent)
+                      (error "ASK-AGENT restart was not established"))))
+
+(test com-eval-prints-single-value
+  (let* ((frame (make-eval-frame))
+         (output (eval-with-stubbed-output frame '(+ 1 2) "(+ 1 2)")))
+    (is (search "3" output))))
+
+(test com-eval-sets-star-to-first-value
+  (let ((frame (make-eval-frame)))
+    (eval-with-stubbed-output frame '(+ 1 2) "(+ 1 2)")
+    (is (eql 3 *))))
+
+(test com-eval-sets-repl-history
+  (let ((frame (make-eval-frame)))
+    (eval-with-stubbed-output frame '(values 1 2) "(values 1 2)")
+    (is (equal '(1 2) /))
+    (eval-with-stubbed-output frame '(values 3 4) "(values 3 4)")
+    (is (equal '(3 4) /))
+    (is (equal '(1 2) //))
+    (is (eql 3 *))
+    (is (eql 1 **))))
+
+(test com-eval-zero-values-emits-nothing
+  (let* ((frame (make-eval-frame))
+         (output (eval-with-stubbed-output frame '(values) "(values)")))
+    (is (string= "" output))))
+
+(test com-eval-zero-values-sets-star-nil
+  (let ((frame (make-eval-frame)))
+    (eval-with-stubbed-output frame '(+ 1 2) "(+ 1 2)")
+    (is (eql 3 *))
+    (eval-with-stubbed-output frame '(values) "(values)")
+    (is (null *))
+    (is (eql 3 **))))
+
+(test com-eval-forwards-stdout
+  (let* ((frame (make-eval-frame))
+         (output (eval-with-stubbed-output
+                 frame '(progn (write-string "hello")) "(progn ...)")))
+    (is (search "hello" output))))
+
+(test com-eval-truncates-at-budget
+  (let* ((frame (make-eval-frame))
+         (output (eval-with-stubbed-output
+                 frame '(progn (dotimes (i 5000) (princ "abcde")))
+                 "(progn ...)")))
+    (is (<= (length output) 20000))
+    (is (search "truncated" output))))
+
+(test com-eval-cyclic-value-does-not-hang
+  (let* ((frame (make-eval-frame))
+         (output (eval-with-stubbed-output
+                 frame '(let ((x (list 1))) (setf (cdr x) x) x)
+                 "(let ...)")))
+    (is (search "#" output))))
+
+(test com-eval-ask-agent-restart-for-unbound-variable
+  (let ((frame (make-eval-frame))
+        (asked-source nil)
+        (say-existed (fboundp 'rplaca::com-say))
+        (say-original (and (fboundp 'rplaca::com-say) (symbol-function 'rplaca::com-say))))
+    (unless say-existed
+      (setf (symbol-function 'rplaca::com-say) (lambda (&rest args))))
+    (unwind-protect
+         (with-listener-function-override
+             (rplaca::com-say (text) (setf asked-source text))
+           (with-listener-function-override
+               (clim:frame-standard-output (f) (declare (ignore f)) (make-string-output-stream))
+             (catch 'test-exit
+               (let ((clim:*application-frame* frame)
+                     (*debugger-hook*
+                       (lambda (condition old-hook)
+                         (declare (ignore old-hook))
+                         (let ((r (find-restart 'rplaca::ask-agent)))
+                           (if r (invoke-restart r)
+                               (throw 'test-exit nil))))))
+                 (rplaca::com-eval '||+unbound-var-xyz|| "  ||+unbound-var-xyz||  "))))
+           (is (string= "  ||+unbound-var-xyz||  " asked-source)))
+      (if say-existed
+          (setf (symbol-function 'rplaca::com-say) say-original)
+          (fmakunbound 'rplaca::com-say)))))
+
+(test com-eval-no-ask-agent-for-type-error
+  (let ((frame (make-eval-frame))
+        (ask-restart nil)
+        (debugger-condition nil)
+        (escape-tag (gensym "TYPE-ERROR-DEBUGGER-ESCAPE")))
+    (with-listener-function-override
+        (clim:frame-standard-output (f)
+          (declare (ignore f))
+          (make-string-output-stream))
+      (catch escape-tag
+        (let ((clim:*application-frame* frame)
+              (*debugger-hook*
+                (lambda (condition old-hook)
+                  (declare (ignore old-hook))
+                  (setf debugger-condition condition
+                        ask-restart (find-restart 'rplaca::ask-agent condition))
+                  (throw escape-tag :caught))))
+          (handler-bind ((type-error #'invoke-debugger))
+            (rplaca::com-eval '(car 1) "(car 1)")))))
+    (is (typep debugger-condition 'type-error))
+    (is (null ask-restart)
+        "type errors reach the debugger without an ASK-AGENT restart")))
+
+(test com-eval-ask-agent-restart-for-undefined-function
+  (let ((frame (make-eval-frame))
+        (asked-source nil))
+    (with-temporary-com-say ((text) (setf asked-source text))
+      (with-listener-function-override
+          (clim:frame-standard-output (f)
+            (declare (ignore f))
+            (make-string-output-stream))
+        (let ((clim:*application-frame* frame)
+              (*debugger-hook* #'invoke-ask-agent-from-debugger))
+          (rplaca::com-eval '(todo7-undefined-function 1)
+                            " (todo7-undefined-function 1) ; exact "))))
+    (is (string= " (todo7-undefined-function 1) ; exact " asked-source))))
+
+(test com-eval-syncs-package-on-success
+  (let ((frame (make-eval-frame)))
+    (eval-with-stubbed-output frame '(in-package :cl-user) "(in-package :cl-user)")
+    (is (string= "COMMON-LISP-USER"
+                 (rplaca::listener-context-package-name
+                  (rplaca::rplaca-listener-context frame))))))
+
+(test com-eval-syncs-package-on-error
+  (let ((frame (make-eval-frame))
+        (caught nil))
+    (with-listener-function-override
+        (clim:frame-standard-output (f) (declare (ignore f)) (make-string-output-stream))
+      (let ((clim:*application-frame* frame))
+        (handler-case
+            (rplaca::com-eval '(progn (in-package :cl)
+                                       (error "boom"))
+                              "(progn ...)")
+          (error (condition) (setf caught condition))))
+      (is (typep caught 'simple-error)
+          "the intended unrelated error must be the condition that escapes: ~S"
+          caught)
+      (let ((synced (rplaca::listener-context-package-name
+                     (rplaca::rplaca-listener-context frame))))
+        (is (string= "COMMON-LISP" synced)
+            "expected COMMON-LISP after (in-package :cl), got ~A" synced)))))
+
+(test com-eval-syncs-buffer-directory
+  (let* ((frame (make-eval-frame))
+         (dir (ensure-directories-exist #P"/tmp/rplaca-7-eval-dir/")))
+    (unwind-protect
+         (progn
+           (with-listener-function-override
+               (clim:frame-standard-output (f)
+                 (declare (ignore f))
+                 (make-string-output-stream))
+             (let ((clim:*application-frame* frame)
+                   (*default-pathname-defaults* dir))
+               (rplaca::com-eval '(+ 1 2) "(+ 1 2)")))
+           (is (equal dir (rplaca::buffer-working-directory
+                           (rplaca::rplaca-listener-conversation-buffer frame)))))
+      (uiop:delete-directory-tree dir
+                                  :validate t
+                                  :if-does-not-exist :ignore))))
+
+(test com-eval-ask-agent-tag-collision-proof
+  "User code throwing 'ask-agent-transfer must NOT route to com-say."
+  (let ((frame (make-eval-frame))
+        (asked nil)
+        (say-existed (fboundp 'rplaca::com-say))
+        (say-original (and (fboundp 'rplaca::com-say) (symbol-function 'rplaca::com-say))))
+    (unless say-existed
+      (setf (symbol-function 'rplaca::com-say) (lambda (&rest args))))
+    (unwind-protect
+         (with-listener-function-override
+             (rplaca::com-say (text) (declare (ignore text)) (setf asked t))
+           (with-listener-function-override
+               (clim:frame-standard-output (f) (declare (ignore f)) (make-string-output-stream))
+             (handler-case
+                 (let ((clim:*application-frame* frame))
+                   (rplaca::com-eval '(throw 'ask-agent-transfer :bogus) "(throw ...)"))
+               (control-error ()))))
+      (is (null asked) "user throw to 'ask-agent-transfer must not reach com-say")
+      (if say-existed
+          (setf (symbol-function 'rplaca::com-say) say-original)
+          (fmakunbound 'rplaca::com-say)))))
+
+(test com-eval-strict-total-output-includes-marker
+  (let* ((frame (make-eval-frame))
+         (side-effect (gensym "OUTPUT-EXHAUSTION-SIDE-EFFECT"))
+         (output (eval-with-stubbed-output
+                 frame `(progn
+                          (write-string (make-string 10001 :initial-element #\o)
+                                        *standard-output*)
+                          (write-string (make-string 10001 :initial-element #\e)
+                                        *error-output*)
+                          (write-string (make-string 10001 :initial-element #\t)
+                                        *trace-output*)
+                          (setf (symbol-value ',side-effect) :ran)
+                          (make-string 10001 :initial-element #\v))
+                 "(progn ...)")))
+    (unwind-protect
+         (progn
+           (is (<= (length output) 20000)
+               "shared output including marker must be <= 20000, got ~A"
+               (length output))
+           (is (= 1 (listener-count-substring
+                     rplaca::+listener-eval-truncation-marker+ output))
+               "the shared stdout/stderr/trace/value budget emits one marker")
+           (is (eq :ran (symbol-value side-effect))
+               "evaluation continues after the shared output budget is exhausted")
+           (is (string=
+                (concatenate
+                 'string
+                 (make-string 10001 :initial-element #\o)
+                 (make-string (- 20000
+                                 10001
+                                 (length rplaca::+listener-eval-truncation-marker+))
+                              :initial-element #\e)
+                 rplaca::+listener-eval-truncation-marker+)
+                output)
+               "stdout exhausts one shared budget before stderr/trace/value writes"))
+      (makunbound side-effect))))
+
+(test com-eval-bounded-write-string-honors-nonzero-start-end
+  (let* ((target (make-string-output-stream))
+         (marker rplaca::+listener-eval-truncation-marker+)
+         (stream (make-instance 'rplaca::listener-bounded-output
+                                :target target
+                                :remaining (+ (length marker) 3)))
+         (source "__ABCDE__"))
+    (is (eq source (sb-gray:stream-write-string stream source 2 7))
+        "Gray stream write-string returns the original string")
+    (is (string= (concatenate 'string "ABC" marker)
+                 (get-output-stream-string target))
+        "nonzero START/END forwards only the content allowance then one marker")
+    (is (zerop (rplaca::bounded-remaining stream)))))
+
+(test com-eval-syncs-unique-package-on-success-error-and-ask
+  (let ((package-name (format nil "RPLACA/TODO7-SYNC-TARGET-~A" (gensym))))
+    (let ((target (make-package package-name :use '(:cl))))
+      (unwind-protect
+           (flet ((assert-target (frame path)
+                    (let* ((context (rplaca::rplaca-listener-context frame))
+                           (resolved (find-package
+                                      (rplaca::listener-context-package-name context))))
+                      (is (eq target resolved)
+                          "~A must synchronize the exact unique package object" path))))
+             (let ((caller-package *package*))
+               (dolist (case '(:success :error :ask))
+                 (let ((frame (make-eval-frame)))
+                   (with-listener-function-override
+                       (clim:frame-standard-output (f)
+                         (declare (ignore f))
+                         (make-string-output-stream))
+                     (let ((clim:*application-frame* frame)
+                           (*package* *package*))
+                       (ecase case
+                         (:success
+                          (rplaca::com-eval `(progn (in-package ,package-name) :ok)
+                                            "package success"))
+                         (:error
+                          (handler-case
+                              (rplaca::com-eval
+                               `(progn (in-package ,package-name)
+                                       (error "todo7 unrelated error"))
+                               "package error")
+                            (error ())))
+                         (:ask
+                          (with-temporary-com-say ((text) (declare (ignore text)))
+                            (let ((*debugger-hook* #'invoke-ask-agent-from-debugger))
+                              (rplaca::com-eval
+                               `(progn (in-package ,package-name)
+                                       todo7-package-sync-unbound)
+                               "package ask")))))))
+                   (assert-target frame case)))
+               (is (eq caller-package *package*)
+                   "the caller's dynamic package binding is restored")))
+        (delete-package target)))))
+
+(test com-eval-syncs-distinct-directories-on-success-error-and-ask
+  (let* ((caller-directory *default-pathname-defaults*)
+         (success-directory (ensure-directories-exist #P"/tmp/rplaca-todo7-success/"))
+         (error-directory (ensure-directories-exist #P"/tmp/rplaca-todo7-error/"))
+         (ask-directory (ensure-directories-exist #P"/tmp/rplaca-todo7-ask/")))
+    (unwind-protect
+         (flet ((buffer-directory (frame)
+                  (rplaca::buffer-working-directory
+                   (rplaca::rplaca-listener-conversation-buffer frame))))
+           (dolist (case `((:success ,success-directory)
+                           (:error ,error-directory)
+                           (:ask ,ask-directory)))
+             (destructuring-bind (path directory) case
+               (let ((frame (make-eval-frame)))
+                 (with-listener-function-override
+                     (clim:frame-standard-output (f)
+                       (declare (ignore f))
+                       (make-string-output-stream))
+                   (let ((clim:*application-frame* frame)
+                         (*default-pathname-defaults* caller-directory))
+                     (ecase path
+                       (:success
+                        (rplaca::com-eval
+                         `(progn (setf *default-pathname-defaults* ,directory) :ok)
+                         "directory success"))
+                       (:error
+                        (handler-case
+                            (rplaca::com-eval
+                             `(progn (setf *default-pathname-defaults* ,directory)
+                                     (error "todo7 unrelated error"))
+                             "directory error")
+                          (error ())))
+                       (:ask
+                        (with-temporary-com-say ((text) (declare (ignore text)))
+                          (let ((*debugger-hook* #'invoke-ask-agent-from-debugger))
+                            (rplaca::com-eval
+                             `(progn (setf *default-pathname-defaults* ,directory)
+                                     todo7-directory-sync-unbound)
+                             "directory ask")))))))
+                 (is (equal directory (buffer-directory frame))
+                     "~A must synchronize its distinct directory" path))))
+           (is (equal caller-directory *default-pathname-defaults*)
+               "the caller's dynamic directory binding is restored"))
+      (dolist (directory (list success-directory error-directory ask-directory))
+        (uiop:delete-directory-tree directory
+                                    :validate t
+                                    :if-does-not-exist :ignore)))))
+
+(test com-eval-history-shifts-exactly-and-binds-minus-during-eval
+  (let ((frame (make-eval-frame)))
+    (let ((+ :old-plus) (++ :old-plus-plus) (+++ :old-plus-plus-plus)
+          (/ '(:old-slash)) (// '(:old-slash-slash)) (/// '(:old-slash-three))
+          (* :old-star) (** :old-star-star) (*** :old-star-three))
+      (eval-with-stubbed-output frame '(values) "zero")
+      (is (equal '(values) +))
+      (is (eq :old-plus ++))
+      (is (eq :old-plus-plus +++))
+      (is (null /))
+      (is (equal '(:old-slash) //))
+      (is (equal '(:old-slash-slash) ///))
+      (is (null *))
+      (is (eq :old-star **))
+      (is (eq :old-star-star ***))
+      (eval-with-stubbed-output frame '(values :one :two) "multiple")
+      (is (equal '(values :one :two) +))
+      (is (equal '(values) ++))
+      (is (eq :old-plus +++))
+      (is (equal '(:one :two) /))
+      (is (null //))
+      (is (equal '(:old-slash) ///))
+      (is (eq :one *))
+      (is (null **))
+      (is (eq :old-star ***))
+      (eval-with-stubbed-output frame '(list -) "minus")
+      (is (equal '((list -)) *)
+          "McCLIM Listener semantics bind - to the current form during eval"))))
+
+(test com-eval-preserves-unrelated-restart-context
+  (let ((frame (make-eval-frame))
+        (output (make-string-output-stream))
+        (found-restart nil)
+        (escape-tag (gensym "TODO7-RESTART-ESCAPE")))
+    (with-listener-function-override
+        (clim:frame-standard-output (requested-frame)
+          (declare (ignore requested-frame))
+          output)
+      (catch escape-tag
+        (let ((clim:*application-frame* frame)
+              (*debugger-hook*
+                (lambda (condition old-hook)
+                  (declare (ignore old-hook))
+                  (let ((restart (find-restart 'todo7-recover condition)))
+                    (setf found-restart restart)
+                    (if restart
+                        (invoke-restart restart)
+                        (throw escape-tag :restart-lost))))))
+          (handler-bind ((simple-error #'invoke-debugger))
+            (rplaca::com-eval
+             '(restart-case
+                  (error "todo7 restart context")
+                (todo7-recover () :recovered))
+             "(restart-case (error ...) (todo7-recover () :recovered))")))))
+    (is-true found-restart)
+    (is (search ":RECOVERED" (get-output-stream-string output))
+        "the original restart resumes the same eval and presents its value")))
+
+(test com-eval-calls-eval-once-for-literal-progn
+  (let ((frame (make-eval-frame))
+        (eval-count 0)
+        (side-effects (gensym "TODO7-PROGN-SIDE-EFFECTS"))
+        (original-eval (symbol-function 'cl:eval))
+        (common-lisp-was-locked-p (sb-ext:package-locked-p :common-lisp)))
+    (setf (symbol-value side-effects) nil)
+    (unwind-protect
+         (progn
+           (when common-lisp-was-locked-p
+             (sb-ext:unlock-package :common-lisp))
+           (setf (symbol-function 'cl:eval)
+                 (lambda (form)
+                   (incf eval-count)
+                   (funcall original-eval form)))
+           (let ((output
+                   (eval-with-stubbed-output
+                    frame
+                    `(progn
+                       (push :first (symbol-value ',side-effects))
+                       (push :second (symbol-value ',side-effects))
+                       :done)
+                    "literal progn")))
+             (is (= 1 eval-count)
+                 "COM-EVAL must call direct EVAL once for the complete user form")
+             (is (equal '(:second :first) (symbol-value side-effects))
+                 "literal PROGN preserves Common Lisp side-effect order")
+             (is (search ":DONE" output))))
+      (setf (symbol-function 'cl:eval) original-eval)
+      (when common-lisp-was-locked-p
+        (sb-ext:lock-package :common-lisp))
+      (makunbound side-effects))))
+
+(test rplaca-listener-frame-standard-output-is-real-stream
+  "The factory's ecase validates pane names; CLX graft proof (7-coverage-manual)
+confirms real stream output.  Headless: verify snapshot key + factory fboundp."
+  (let ((rplaca::*package-appearance-catalog* (rplaca::make-classic-appearance-catalog))
+        (frame (clim:make-application-frame
+                'rplaca::rplaca-listener
+                :conversation-buffer (make-test-conversation-buffer)
+                :appearance-profile (rplaca::make-appearance-profile)
+                :listener-context (rplaca::make-listener-context))))
+    (is (fboundp 'rplaca::make-rplaca-listener-pane))
+    (let ((snap (rplaca::rplaca-listener-pane-appearance-snapshot frame)))
+      (is (cdr (assoc 'rplaca::interactor snap :test #'eq))))))

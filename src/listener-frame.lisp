@@ -82,39 +82,41 @@ ignored: the context accessor or require-listener-input-mode signals."
   (:command-table (rplaca-listener))
   (:menu-bar nil)
   (:panes
-   ;; define-application-frame generates the pane constructor as
-   ;; (lambda (clim-internals::fm clim-internals::frame) ...), so the pane forms
-   ;; must reference that exact lexical frame symbol and exported CLIM pane classes.
-   (interactor (make-rplaca-listener-pane 'interactor 'clim:interactor-pane nil
-                                          clim-internals::frame))
-   (pointer-doc (make-rplaca-listener-pane 'pointer-doc 'clim:pointer-documentation-pane nil
-                                           clim-internals::frame))
-   (wholine (make-rplaca-listener-pane 'wholine 'clim:application-pane 'display-listener-wholine
-                                       clim-internals::frame))
-   (details (make-rplaca-listener-pane 'details 'clim:application-pane 'display-turn-details
-                                       clim-internals::frame)))
+   ;; Pane spec names are container names (e.g. interactor-container).
+   ;; coerce-pane-name names the wrapper with the spec name.  The factory
+   ;; passes :name '<semantic> to the inner stream pane, so find-pane-named
+   ;; 'interactor finds the inner stream, not the wrapper (matching the
+   ;; McCLIM Listener pattern).  Layouts reference container names.
+   (interactor-container (make-rplaca-listener-pane 'interactor 'clim:interactor-pane nil
+                                                     clim-internals::frame))
+   (pointer-doc-container (make-rplaca-listener-pane 'pointer-doc 'clim:pointer-documentation-pane nil
+                                                      clim-internals::frame))
+   (wholine-container (make-rplaca-listener-pane 'wholine 'clim:application-pane 'display-listener-wholine
+                                                  clim-internals::frame))
+   (details-container (make-rplaca-listener-pane 'details 'clim:application-pane 'display-turn-details
+                                                  clim-internals::frame)))
   (:layouts
    (listener-only
     (clim:vertically ()
-      interactor
-      pointer-doc
-      wholine))
+      interactor-container
+      pointer-doc-container
+      wholine-container))
    (listener+details
     (clim:horizontally ()
-      details
+      details-container
       (clim:vertically ()
-        interactor
-        pointer-doc
-        wholine))))
+        interactor-container
+        pointer-doc-container
+        wholine-container))))
   (:top-level (listener-frame-top-level)))
 
-;;; Output always maps to the named interactor in both layouts; McCLIM would
-;;; otherwise select the details application pane after a layout recomputation.
+;;; Output maps to the inner interactor stream pane (not the outlined wrapper).
+;;; get-frame-pane finds the inner pane by name then find-pane-of-type.
 (defmethod clim:frame-standard-output ((frame rplaca-listener))
-  (clim:find-pane-named frame 'interactor))
+  (clim:get-frame-pane frame 'interactor))
 
 (defmethod clim:frame-error-output ((frame rplaca-listener))
-  (clim:find-pane-named frame 'interactor))
+  (clim:get-frame-pane frame 'interactor))
 
 (defun listener-print-prompt (stream frame)
   "Write the package/mode-aware prompt for FRAME to STREAM."

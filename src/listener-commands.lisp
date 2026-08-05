@@ -5,9 +5,9 @@
 ;; --------------------------------------------------------------------------
 ;;;
 ;;; read-frame-command accepts command-form-or-prose (todo 4) and maps each
-;;; listener-input-token kind to a command form.  This file defines only the
-;;; hidden no-op/error/shell/mode commands needed now; com-eval (todo 7) and
-;;; com-say (todo 8) remain forward-declared by the mapping but unimplemented.
+;;; listener-input-token kind to a command form.  This file defines the hidden
+;;; no-op/error/shell/mode commands and com-eval (todo 7); com-say (todo 8)
+;;; remains forward-declared by the mapping but unimplemented.
 
 (defun listener-token->command (token frame stream)
   "Map a listener-input-token to the command form for read-frame-command.
@@ -95,3 +95,123 @@ prompt reflects the new mode."
     (setf (rplaca-listener-context frame)
           (listener-context-set-input-mode
            (rplaca-listener-context frame) mode))))
+
+;;; --------------------------------------------------------------------------
+;;; Eval core (todo 7): com-eval with bounded output, value presentations,
+;;; REPL history, ASK-AGENT restart, and context synchronization.
+;;; --------------------------------------------------------------------------
+
+(defparameter +listener-eval-output-limit+ 20000)
+(defparameter +listener-eval-truncation-marker+ " [...truncated]")
+
+(defclass listener-bounded-output (sb-gray:fundamental-character-output-stream)
+  ((target :initarg :target :reader bounded-target)
+   (remaining :initarg :remaining :accessor bounded-remaining)
+   (marker-len :initform (length +listener-eval-truncation-marker+)
+               :reader bounded-marker-len)
+   (marker-p :initform nil :accessor bounded-marker-p)))
+
+(defmethod sb-gray:stream-write-char ((stream listener-bounded-output) char)
+  (with-slots (target remaining marker-len marker-p) stream
+    (cond
+      ((> remaining marker-len)
+       (write-char char target) (decf remaining))
+      ((not marker-p)
+       (setf marker-p t)
+       (write-string +listener-eval-truncation-marker+ target)
+       (setf remaining 0))
+      (t nil))))
+
+(defmethod sb-gray:stream-write-string ((stream listener-bounded-output)
+                                         string &optional (start 0) end)
+  (let* ((end (or end (length string)))
+         (len (- end start)))
+    (with-slots (target remaining marker-len marker-p) stream
+      (unless marker-p
+        (let* ((allowance (max 0 (- remaining marker-len)))
+               (count (min len allowance)))
+          (when (plusp count)
+            (write-string string target :start start :end (+ start count))
+            (decf remaining count))
+          (when (> len count)
+            (setf marker-p t)
+            (write-string +listener-eval-truncation-marker+ target)
+            (decf remaining marker-len))))))
+  string)
+
+(defmethod sb-gray:stream-line-column ((stream listener-bounded-output)) nil)
+(defmethod sb-gray:stream-finish-output ((stream listener-bounded-output))
+  (finish-output (bounded-target stream)))
+(defmethod sb-gray:stream-force-output ((stream listener-bounded-output))
+  (force-output (bounded-target stream)))
+
+(defun listener-sync-eval-context (frame package directory)
+  (setf (rplaca-listener-context frame)
+        (listener-context-set-package
+         (rplaca-listener-context frame) (package-name package)))
+  (setf (buffer-working-directory (rplaca-listener-conversation-buffer frame))
+        directory))
+
+(defun listener-update-repl-history (form values)
+  "Shuffle +/+++ and */*** unconditionally per the standard REPL contract.
+Zero values sets * to NIL and still shifts ** /***."
+  (setq cl:+++ cl:++ cl:++ cl:+ cl:+ form
+        cl:/// cl:// cl:// cl:/ cl:/ values)
+  (setq cl:*** cl:** cl:** cl:* cl:* (first values)))
+
+(defun listener-eval-form (form source-text)
+  "Core eval logic: evaluate FORM, present values, update history, offer ASK-AGENT.
+Returns the source-text if ASK-AGENT was invoked, or NIL otherwise."
+  (let* ((frame clim:*application-frame*)
+         (interactor (clim:frame-standard-output frame))
+         (bounded (make-instance 'listener-bounded-output
+                                  :target interactor
+                                  :remaining +listener-eval-output-limit+))
+         (ask-tag (gensym "ASK-AGENT-TRANSFER")))
+    (let ((*package* *package*)
+          (*default-pathname-defaults* *default-pathname-defaults*))
+      (unwind-protect
+           (catch ask-tag
+             (let ((*standard-output* bounded)
+                   (*error-output* bounded)
+                   (*trace-output* bounded)
+                   (*standard-input* interactor)
+                   (cl:- form))
+               (handler-bind
+                   ((unbound-variable
+                      (lambda (condition)
+                        (restart-case
+                            (invoke-debugger condition)
+                          (ask-agent ()
+                            :report "Ask the agent about this"
+                            (throw ask-tag source-text)))))
+                    (undefined-function
+                      (lambda (condition)
+                        (restart-case
+                            (invoke-debugger condition)
+                          (ask-agent ()
+                            :report "Ask the agent about this"
+                            (throw ask-tag source-text))))))
+                 (let ((values (multiple-value-list (eval form))))
+                   (listener-update-repl-history form values)
+                   (let ((*print-length* 100)
+                         (*print-level* 8)
+                         (*print-circle* t)
+                         (*print-readably* nil)
+                         (*print-pretty* nil)
+                         (*print-escape* t))
+                     (dolist (value values)
+                       (clim:with-output-as-presentation
+                           (interactor value 'clim:expression)
+                         (let ((*standard-output* bounded))
+                           (prin1 value)
+                           (terpri)))))))
+             nil))
+        (listener-sync-eval-context frame
+                                    *package*
+                                    *default-pathname-defaults*)))))
+
+(define-rplaca-listener-command (com-eval) ((form t) (source-text string))
+  (let ((ask-source (listener-eval-form form source-text)))
+    (when (and ask-source (fboundp 'com-say))
+      (funcall (symbol-function 'com-say) ask-source))))
