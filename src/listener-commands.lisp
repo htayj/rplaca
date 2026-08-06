@@ -6,8 +6,7 @@
 ;;;
 ;;; read-frame-command accepts command-form-or-prose (todo 4) and maps each
 ;;; listener-input-token kind to a command form.  This file defines the hidden
-;;; no-op/error/shell/mode commands and com-eval (todo 7); com-say (todo 8)
-;;; remains forward-declared by the mapping but unimplemented.
+;;; no-op/error/shell/mode commands, com-eval, and com-say.
 
 (defun listener-token->command (token frame stream)
   "Map a listener-input-token to the command form for read-frame-command.
@@ -95,6 +94,90 @@ prompt reflects the new mode."
     (setf (rplaca-listener-context frame)
           (listener-context-set-input-mode
            (rplaca-listener-context frame) mode))))
+
+;;; --------------------------------------------------------------------------
+;;; Say core: literal prose submission and one final inline assistant turn.
+;;; --------------------------------------------------------------------------
+
+(defun listener-write-input-error (frame condition)
+  (let ((stream (clim:frame-standard-output frame)))
+    (format stream "~A~%" condition)))
+
+(defun listener-say-busy-p (frame buffer)
+  (or (not (eq :live (rplaca-listener-liveness frame)))
+      (buffer-agent-busy-p buffer)))
+
+(defun require-listener-agent-turn-await-boundary ()
+  (unless (fboundp 'await-listener-agent-turn)
+    (error "AWAIT-LISTENER-AGENT-TURN is not installed; todo9 must provide the listener settlement boundary."))
+  (symbol-function 'await-listener-agent-turn))
+
+(defun run-listener-say-turn (frame buffer source)
+  "Expand SOURCE, submit it once, await settlement, and emit one final turn."
+  (when (listener-say-busy-p frame buffer)
+    (listener-write-input-error frame "An agent turn is already active.")
+    (return-from run-listener-say-turn nil))
+  (let* ((context (rplaca-listener-context frame))
+         (package (find-package (listener-context-package-name context)))
+         (expanded
+           (handler-case
+               (expand-prose-interpolations source package #'eval)
+             (prose-interpolation-error (condition)
+               (listener-write-input-error frame condition)
+               (return-from run-listener-say-turn nil)))))
+    (let ((boundary nil)
+          (captured-result nil)
+          (captured-result-p nil))
+      (labels ((capture-completion (hook-buffer hook-text result)
+                 (when (and (eq buffer hook-buffer)
+                            (string= expanded hook-text))
+                   (setf captured-result result
+                         captured-result-p t)
+                   (when boundary
+                     (setf (listener-turn-boundary-completion-result boundary)
+                           result
+                           (listener-turn-boundary-completion-result-p boundary)
+                           t)))))
+        (add-hook '*after-send-message-hook* #'capture-completion :append t)
+        (unwind-protect
+             (multiple-value-bind
+                   (dispatch-result accepted-p turn-boundary)
+                 (send-prose-message buffer expanded)
+               (unless accepted-p
+                 (return-from run-listener-say-turn nil))
+               (setf boundary turn-boundary)
+               (when captured-result-p
+                 (setf (listener-turn-boundary-completion-result boundary)
+                       captured-result
+                       (listener-turn-boundary-completion-result-p boundary)
+                       t))
+               (let* ((await (require-listener-agent-turn-await-boundary))
+                      (turn
+                        (handler-case
+                            (progn
+                              (funcall await frame buffer dispatch-result)
+                              (make-settled-listener-assistant-turn
+                               buffer boundary :complete))
+                          (prompt-run-error (condition)
+                            (make-settled-listener-assistant-turn
+                             buffer boundary :error
+                             :condition condition
+                             :primary-text (format nil "[Error: ~A]"
+                                                   condition)))
+                          (prompt-run-cancelled (condition)
+                            (declare (ignore condition))
+                            (make-settled-listener-assistant-turn
+                             buffer boundary :cancelled
+                             :primary-text "[Response cancelled.]")))))
+                 (setf (rplaca-listener-pending-assistant-turn frame) turn)
+                 (emit-listener-assistant-turn frame turn)))
+          (remove-hook '*after-send-message-hook* #'capture-completion))))))
+
+(define-rplaca-listener-command (com-say) ((source prose))
+  "Send literal prose to the active listener's agent and own its inline turn."
+  (let* ((frame clim:*application-frame*)
+         (buffer (rplaca-listener-conversation-buffer frame)))
+    (run-listener-say-turn frame buffer source)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Eval core (todo 7): com-eval with bounded output, value presentations,

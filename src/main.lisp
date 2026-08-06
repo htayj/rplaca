@@ -121,6 +121,284 @@ historical immediate hook boundary."
                             buffer input-text result))
       result)))
 
+(defun dispatch-finalized-prose-input (buffer input-text)
+  "Dispatch finalized literal prose without slash, template, or prefix routing."
+  (let ((result
+          (if (buffer-pipeline-name buffer)
+              (start-interactive-pipeline-for-buffer buffer input-text)
+              (send-to-agent-with-context buffer))))
+    (unless (interactive-buffer-operation-p result)
+      (run-hook-with-args '*after-send-message-hook*
+                          buffer input-text result))
+    result))
+
+(defstruct (listener-turn-boundary
+              (:constructor make-listener-turn-boundary
+                  (&key message)))
+  (message nil :type (or null message))
+  (compaction-handoff-count 0 :type (integer 0 1))
+  completion-result
+  (completion-result-p nil :type boolean))
+
+(defun listener-turn-boundary-for-message (message)
+  (make-listener-turn-boundary :message message))
+
+(defun listener-last-finalized-user-message (buffer)
+  (loop :for message := (message-prev (buffer-input-message buffer))
+          :then (message-prev message)
+        :while message
+        :when (eq :user (message-sender message))
+          :return message))
+
+(defun handoff-listener-turn-boundary-after-compaction (buffer boundary)
+  "Rebind BOUNDARY once to the recreated user before provider dispatch."
+  (unless (zerop (listener-turn-boundary-compaction-handoff-count boundary))
+    (error "Listener turn boundary received more than one compaction handoff."))
+  (let ((message (listener-last-finalized-user-message buffer)))
+    (unless message
+      (error "Compaction did not retain the listener turn user boundary."))
+    (setf (listener-turn-boundary-message boundary) message
+          (listener-turn-boundary-compaction-handoff-count boundary) 1))
+  boundary)
+
+(defun send-prose-message (buffer text)
+  "Finalize and dispatch TEXT as literal prose.
+
+Returns the dispatch result, true when accepted, and a stable turn boundary.
+Blank or busy submissions return NIL values without mutating BUFFER."
+  (when (or (blank-string-p text)
+            (buffer-agent-busy-p buffer))
+    (return-from send-prose-message (values nil nil)))
+  (set-message-text (buffer-input-message buffer) text)
+  (ensure-buffer-session buffer)
+  (run-hook-with-args '*before-send-message-hook* buffer text)
+  (buffer-finalize-input buffer)
+  (let ((boundary
+          (listener-turn-boundary-for-message
+           (message-prev (buffer-input-message buffer)))))
+    (multiple-value-bind (operation needed-p)
+        (start-interactive-compaction
+         buffer
+         :reason :pre-user-message
+         :continuation
+         (lambda (live-buffer)
+            (handoff-listener-turn-boundary-after-compaction
+             live-buffer boundary)
+            (dispatch-finalized-prose-input live-buffer text)))
+      (declare (ignore needed-p))
+      (values (or operation
+                  (dispatch-finalized-prose-input buffer text))
+              t
+              boundary))))
+
+(defun resolve-listener-turn-boundary (buffer boundary)
+  "Return BOUNDARY's exact user message when it remains in BUFFER."
+  (let ((boundary-message (listener-turn-boundary-message boundary)))
+    (loop :for message := (buffer-first-message buffer)
+            :then (message-next message)
+          :while (and message
+                      (not (eq message (buffer-input-message buffer))))
+          :when (eq message boundary-message)
+            :return message)))
+
+(defun listener-provider-assistant-message-p (message)
+  "Return true when MESSAGE has the existing provider assistant role."
+  (not (member (message-sender message)
+               '(:user :tool-result :compaction-summary :branch-summary
+                 :context :system)
+               :test #'eq)))
+
+(defun listener-agent-messages-after (buffer boundary)
+  "Return provider assistant messages after resolved BOUNDARY."
+  (let ((user-message (resolve-listener-turn-boundary buffer boundary)))
+    (unless user-message
+      (error "Listener turn user boundary is no longer present."))
+    (loop :for message := (message-next user-message) :then (message-next message)
+          :while (and message
+                      (not (eq message (buffer-input-message buffer)))
+                      (not (eq :user (message-sender message))))
+          :when (listener-provider-assistant-message-p message)
+            :collect message)))
+
+(defun listener-message-metadata-plist (message)
+  "Return MESSAGE's canonical metadata alist as a presentation plist."
+  (loop :for (key . value) :in (and message (message-metadata message))
+        :append (list key value)))
+
+(defun listener-message-metadata-value (message key)
+  (and message
+       (message-metadata-value (message-metadata message) key)))
+
+(defun listener-metadata-key-present-p (plist key)
+  (loop :for tail :on plist :by #'cddr
+        :thereis (eq key (first tail))))
+
+(defun merge-listener-metadata (&rest plists)
+  "Merge PLISTS in precedence order, retaining each key exactly once."
+  (let ((merged nil))
+    (dolist (plist plists merged)
+      (loop :for (key value) :on plist :by #'cddr
+            :unless (listener-metadata-key-present-p merged key)
+              :do (setf merged (append merged (list key value)))))))
+
+(defun listener-condition-metadata (condition)
+  (when condition
+    (append
+     (list :error (prompt-run-error-message condition)
+           :iterations (prompt-run-error-iterations condition))
+     (when (prompt-run-error-provider condition)
+       (list :provider (prompt-run-error-provider condition)))
+     (when (prompt-run-error-model condition)
+       (list :model (prompt-run-error-model condition)))
+     (when (prompt-run-error-think-level condition)
+       (list :think-level (prompt-run-error-think-level condition)))
+     (when (prompt-run-error-tool-events condition)
+       (list :prompt-tool-events
+             (copy-list (prompt-run-error-tool-events condition)))))))
+
+(defun listener-buffer-metadata (buffer)
+  (list :buffer-agent (buffer-agent-name buffer)
+        :buffer-status (buffer-status buffer)
+        :buffer-session-name (and (buffer-session buffer)
+                                  (session-name (buffer-session buffer)))
+        :buffer-session-id (and (buffer-session buffer)
+                                (session-id (buffer-session buffer)))))
+
+(defun listener-turn-metadata
+    (buffer message &optional condition prompt-result)
+  "Assemble unique canonical, condition, message, and buffer metadata."
+  (merge-listener-metadata
+   (listener-prompt-result-metadata prompt-result)
+   (listener-condition-metadata condition)
+   (listener-message-metadata-plist message)
+   (listener-buffer-metadata buffer)))
+
+(defun listener-tool-use-plist (block)
+  "Normalize canonical tool-use alist BLOCK to the assistant-turn plist shape."
+  (loop :for (key . value) :in block
+        :append (list key (copy-tree value))))
+
+(defun listener-turn-content-facets (messages)
+  "Return canonical tool uses and reasoning from MESSAGES."
+  (values
+   (loop :for message :in messages
+         :append (mapcar #'listener-tool-use-plist
+                         (content-tool-use-blocks
+                          (message-raw-content message))))
+   (loop :for message :in messages
+         :append (content-reasoning-blocks (message-raw-content message)))))
+
+(defun listener-turn-reference-values (messages key)
+  "Return all list-valued metadata references named KEY in MESSAGES."
+  (loop :for message :in messages
+        :for refs := (listener-message-metadata-value message key)
+        :when refs :append (copy-list refs)))
+
+(defun listener-turn-completion-prompt-result (boundary)
+  "Return BOUNDARY's supported canonical prompt result, when available."
+  (when (listener-turn-boundary-completion-result-p boundary)
+    (let ((result (listener-turn-boundary-completion-result boundary)))
+      (cond
+        ((prompt-run-result-p result) result)
+        ((and (pipeline-run-result-p result)
+              (eq :succeeded (pipeline-run-result-status result)))
+         (pipeline-run-result->prompt-run-result result))))))
+
+(defun listener-turn-canonical-pipeline-result-p (boundary prompt-result)
+  "Return true when PROMPT-RESULT is BOUNDARY's successful pipeline result."
+  (and prompt-result
+       (listener-turn-boundary-completion-result-p boundary)
+       (let ((result (listener-turn-boundary-completion-result boundary)))
+         (and (pipeline-run-result-p result)
+              (eq :succeeded (pipeline-run-result-status result))))))
+
+(defun listener-prompt-result-tool-uses (result)
+  "Return canonical tool-use blocks from RESULT's aggregate tool events."
+  (when result
+    (mapcar
+     (lambda (event)
+       (listener-tool-use-plist
+        (canonical-tool-use-block
+         (prompt-tool-event-id event)
+         (prompt-tool-event-name event)
+         (prompt-tool-event-input event))))
+     (prompt-run-result-tool-events result))))
+
+(defun listener-prompt-result-metadata (result)
+  (when result
+    (append
+     (when (prompt-run-result-agent-name result)
+       (list :agent (prompt-run-result-agent-name result)))
+     (when (prompt-run-result-provider result)
+       (list :provider (prompt-run-result-provider result)))
+     (when (prompt-run-result-model result)
+       (list :model (prompt-run-result-model result)))
+     (when (prompt-run-result-think-level result)
+       (list :think-level (prompt-run-result-think-level result)))
+     (when (prompt-run-result-iterations result)
+       (list :iterations (prompt-run-result-iterations result)))
+     (when (prompt-run-result-stop-reason result)
+       (list :stop-reason (prompt-run-result-stop-reason result)))
+     (when (prompt-run-result-tool-events result)
+       (list :prompt-tool-events
+             (copy-list (prompt-run-result-tool-events result))))
+     (when (prompt-run-result-usage result)
+       (list :usage (copy-tree (prompt-run-result-usage result)))))))
+
+(defun make-settled-listener-assistant-turn
+    (buffer boundary status &key condition primary-text)
+  "Build one assistant-turn from the result settled after BOUNDARY."
+  (let* ((messages (listener-agent-messages-after buffer boundary))
+         (latest (car (last messages)))
+         (prompt-result (listener-turn-completion-prompt-result boundary))
+         (canonical-pipeline-result-p
+           (listener-turn-canonical-pipeline-result-p boundary prompt-result))
+         (canonical-pipeline-primary-p
+           (and canonical-pipeline-result-p
+                (not (blank-string-p
+                      (prompt-run-result-final-text prompt-result))))))
+    (when (and (eq status :complete) (null latest) (null prompt-result))
+      (error "Agent turn settled without an assistant message."))
+    (multiple-value-bind (tool-uses reasoning)
+        (listener-turn-content-facets messages)
+      (make-assistant-turn
+       :primary-text
+       (or primary-text
+           (and canonical-pipeline-primary-p
+                (prompt-run-result-final-text prompt-result))
+           (and latest
+                (if (message-raw-content latest)
+                    (content-text-blocks (message-raw-content latest))
+                    (message-text latest)))
+           (prompt-run-result-final-text prompt-result))
+       :tool-uses (if canonical-pipeline-result-p
+                      (listener-prompt-result-tool-uses prompt-result)
+                      tool-uses)
+       :reasoning (cond
+                    (canonical-pipeline-result-p
+                     (copy-list
+                      (prompt-run-result-reasoning-blocks prompt-result)))
+                    (messages reasoning)
+                    (prompt-result
+                     (copy-list
+                      (prompt-run-result-reasoning-blocks prompt-result))))
+       :metadata (listener-turn-metadata
+                  buffer latest condition prompt-result)
+       :artifact-refs (listener-turn-reference-values messages :artifact-refs)
+       :media-refs (listener-turn-reference-values messages :media-refs)
+       :inspect-payload (if canonical-pipeline-result-p
+                            prompt-result
+                            (and latest (message-raw-content latest)))
+       :status status))))
+
+(defun emit-listener-assistant-turn (frame turn)
+  "Emit TURN's primary body once as one durable presentation."
+  (let ((stream (clim:frame-standard-output frame)))
+    (clim:with-output-as-presentation (stream turn 'assistant-turn)
+      (write-string (assistant-turn-primary-text turn) stream))
+    (terpri stream))
+  turn)
+
 (defun send-message (buffer)
   "Send the current input message to the agent."
   (cond

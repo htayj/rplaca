@@ -73,6 +73,7 @@
                               (:file "listener-dispatch-test")
                               (:file "listener-commands-core-test")
                               (:file "listener-frame-test")
+                              (:file "listener-say-test")
                               (:file "legacy-path-test")
                               (:file "migration-integration-test")
                               (:file "package-manager-test")

@@ -18,6 +18,10 @@
   :description "Listener frame fixture and delegated presentation acceptance tests"
   :in rplaca-suite)
 
+(def-suite listener-say-suite
+  :description "Listener force-prose submission and inline assistant turn tests"
+  :in rplaca-suite)
+
 (def-suite legacy-path-suite
   :description "Legacy path migration tests"
   :in rplaca-suite)
