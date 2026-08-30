@@ -1234,7 +1234,7 @@
     (is-true (rplaca:find-pipeline-definition "unowned-pipeline"))
     (is-true (rplaca:find-pipeline-test-profile "unowned-profile"))))
 
-(test provider-live-eval-and-generic-frame-tools-are-refused
+(test provider-immediate-live-eval-is-refused
   "Provider prompt mode never executes live lisp_eval bodies."
   (let* ((*provider-live-eval-test-ran-p* nil)
          (buffer (make-buffer "provider-live-eval"
@@ -1257,7 +1257,10 @@
              "lisp_eval" '((:mode . "live")))))
     (is (eq :background
             (rplaca::interactive-tool-execution-policy
-             "lisp_eval" '((:mode . "isolated")))))))
+             "lisp_eval" '((:mode . "isolated")))))
+    (is (eq :frame
+            (rplaca::interactive-tool-execution-policy
+             "live_lisp_eval" '((:code . "(+ 1 2)")))))))
 
 (test interactive-pipeline-provider-stream-is-cancellable
   "Stop cancels a pipeline provider stream and applies no worker messages."

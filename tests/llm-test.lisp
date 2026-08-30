@@ -404,7 +404,8 @@
            (tools (coerce (rplaca::tool-definitions-for-api) 'list))
            (tool-names (sort (mapcar (lambda (tool) (cdr (assoc :name tool))) tools)
                              #'string<)))
-      (is (equal '("edit" "find" "grep" "lisp_eval" "read" "recovery_list" "write")
+      (is (equal '("edit" "find" "grep" "lisp_eval" "live_lisp_eval"
+                   "read" "recovery_list" "write")
                  tool-names))
       (is (string= "RPLACA" rplaca:*lisp-eval-default-package*))
       (dolist (name '("read" "find" "grep" "write" "edit" "lisp_eval"))
@@ -425,7 +426,8 @@
            (tool-names (mapcar (lambda (tool)
                                  (cdr (assoc :name tool)))
                                tools)))
-      (is (equal '("edit" "find" "grep" "lisp_eval" "read" "recovery_list" "write")
+      (is (equal '("edit" "find" "grep" "lisp_eval" "live_lisp_eval"
+                   "read" "recovery_list" "write")
                  tool-names)))))
 
 (test mcclim-provider-live-lisp-eval-refusal-continues-tool-loop
@@ -1214,7 +1216,8 @@
                                        (cdr (assoc :name tool)))
                                      tools)
                              #'string<)))
-      (is (equal '("lisp_eval" "recovery_list") tool-names))
+      (is (equal '("lisp_eval" "live_lisp_eval" "recovery_list")
+                 tool-names))
       (is (not (null (gethash "lisp_eval" rplaca::*tool-table*))))
       (is-false (member "read" tool-names :test #'string=)))))
 
@@ -1237,7 +1240,8 @@
                                        (cdr (assoc :name tool)))
                                      tools)
                              #'string<)))
-      (is (equal '("lisp_eval" "read" "recovery_list") tool-names))
+      (is (equal '("lisp_eval" "live_lisp_eval" "read" "recovery_list")
+                 tool-names))
       (is (string= "user-read"
                    (rplaca:execute-tool "read" nil))))))
 
@@ -1264,7 +1268,8 @@
                                        (cdr (assoc :name tool)))
                                      tools)
                              #'string<)))
-      (is (equal '("lisp_eval" "read" "recovery_list") tool-names))
+      (is (equal '("lisp_eval" "live_lisp_eval" "read" "recovery_list")
+                 tool-names))
       (is (string= "user-read"
                    (rplaca:execute-tool "read" nil))))))
 
@@ -1384,6 +1389,39 @@
       (is (string= "CL-USER" (event-value (first events) :package)))
       (is (string= "ok" (event-value (second events) :status)))
       (is (search "42" (event-value (second events) :result))))))
+
+(test live-lisp-eval-runs-in-current-image-and-is-checkpointed
+  "The explicit live tool sees current-image state and records recovery data."
+  (with-tool-table-restored
+    (initialize-test-tools)
+    (let* ((buf (make-chat-buffer "live-lisp-eval-checkpoint"))
+           (*current-caller* :coder)
+           (*current-tool-buffer* buf)
+           (marker (gensym "LIVE-MARKER-"))
+           (result (rplaca::execute-tool-safely
+                    "live_lisp_eval"
+                    `(:code ,(format nil "(quote ~S)" marker)
+                      :package "RPLACA/TESTS")
+                    :buffer buf
+                    :tool-id "toolu-live-eval-checkpoint"))
+           (events (lisp-eval-checkpoint-test-events buf)))
+      (is (search (symbol-name marker) result))
+      (is (= 2 (length events)))
+      (is (string= "live" (event-value (first events) :mode)))
+      (is (string= "ok" (event-value (second events) :status)))
+      (is (eq :frame
+              (rplaca::interactive-tool-execution-policy
+               "live_lisp_eval" `((:code . ,(format nil "(quote ~S)" marker)))))))))
+
+(test live-lisp-eval-description-carries-prominent-risk-warning
+  "Provider discovery makes the live evaluator's session risk explicit."
+  (with-tool-table-restored
+    (initialize-test-tools)
+    (let* ((definition (rplaca::effective-tool-definition "live_lisp_eval"))
+           (description (rplaca::tool-definition-description definition)))
+      (is (search "DANGER" description))
+      (is (search "no timeout or isolation" description))
+      (is (search "lose the user's unsaved session" description)))))
 
 (test execute-tool-safely-checkpoints-lisp-eval-tool-errors
   "lisp_eval recovery checkpoints retain tool wrapper errors for repair."
@@ -1550,7 +1588,8 @@
            (tools (coerce (rplaca::tool-definitions-for-api) 'list))
            (tool-names (sort (mapcar (lambda (tool) (cdr (assoc :name tool))) tools)
                              #'string<)))
-      (is (equal '("custom_probe" "edit" "find" "grep" "lisp_eval" "read" "recovery_list" "write")
+      (is (equal '("custom_probe" "edit" "find" "grep" "lisp_eval"
+                   "live_lisp_eval" "read" "recovery_list" "write")
                  tool-names))
       (is (not (null (gethash "custom_probe" rplaca::*tool-table*))))
       (is (not (null (gethash "lisp_eval" rplaca::*tool-table*)))))))
@@ -1809,13 +1848,15 @@ same
           (is (search "- write: Create or overwrite a text file" prompt))
           (is (search "- edit: Edit a text file" prompt))
           (is (search "- lisp_eval: Evaluate one Common Lisp form" prompt))
+          (is (search "- live_lisp_eval: DANGER:" prompt))
           (is (search "Tool calls and tool results use Lisp data mode" prompt))
           (is (search ":old-text" prompt))
           (is (search ":new-text" prompt))
           (is (search "Prefer provider tools for normal work" prompt))
           (is (search "Use find to locate files by name" prompt))
           (is (search "Use grep to locate literal text" prompt))
-          (is (search "provider-driven live evaluation is refused" prompt))
+          (is (search "dangerous escape hatch" prompt))
+          (is (search "lose the user's unsaved session" prompt))
           (is (search "Current date:" prompt))
           (is (search "Current working directory:" prompt))
           (is (search (rplaca::current-system-prompt-date) prompt))

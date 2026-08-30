@@ -235,8 +235,9 @@ Guidelines:
 - Use edit for precise changes when :old-text can match exactly once.
 - Use write for new files or complete rewrites.
 - write and edit reject content that leaves Lisp parentheses unbalanced.
-- Use lisp_eval only with :mode \"isolated\" for Common Lisp tests or introspection when no exposed tool fits. Provider-driven live evaluation is refused because it can block or terminate the CLIM frame process.
-- Return Lisp values from lisp_eval; prefer (format nil ...) over printing when you need a composed string.
+- Use lisp_eval with :mode \"isolated\" for Common Lisp tests or introspection when no exposed tool fits.
+- live_lisp_eval is a dangerous escape hatch into the running RPLACA UI image. Use it only when live state is essential; prefer read-only, bounded, non-blocking forms. It has no timeout or isolation and can corrupt state, hang or terminate RPLACA, and lose the user's unsaved session. Test uncertain code with isolated lisp_eval first.
+- Return Lisp values from Lisp eval tools; prefer (format nil ...) over printing when you need a composed string.
 - Be concise in user-facing replies.
 - Show file paths clearly when working with files.
 - To display a local image to the user, put a Markdown image link on its own line, such as `![alt text](relative/path.png)`."

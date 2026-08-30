@@ -438,7 +438,7 @@ provider request after the frame has withdrawn it."
   "Polling interval in seconds while waiting for shell_exec to finish.")
 
 (defparameter *built-in-tool-names*
-  '("lisp_eval" "recovery_list")
+  '("lisp_eval" "live_lisp_eval" "recovery_list")
   "Names reserved for core RPLACA provider tools.
 INIT-TOOLS removes these entries before re-registering tagged tools, so
 user-added tools stored in *tool-table* are left intact.")
@@ -791,7 +791,7 @@ are not a security boundary."
         (format s "<tools>~%")
         (format s "## Tools~%")
         (format s "Use the provider tools for normal actions. Tool inputs and tool results use Lisp data mode with keyword arguments.~%")
-        (format s "Use `lisp_eval` only with mode=isolated for Common Lisp tests or introspection when no exposed tool fits; provider-driven live evaluation is refused.~%")
+        (format s "Use `lisp_eval` only with mode=isolated for Common Lisp tests or introspection when no exposed tool fits. `live_lisp_eval` runs in the active RPLACA UI image and can hang, corrupt, or terminate the user's session; use it only when live state is essential, prefer read-only forms, and never test destructive or uncertain code with it.~%")
         (format s "### Available tools~%")
         (dolist (tool sorted-tools)
           (multiple-value-bind (name description)
@@ -976,12 +976,19 @@ Failures while journaling are logged but never abort tool execution."
                                      (format nil "~A" condition)))))))))
 
 (defun lisp-eval-tool-p (tool-name)
-  "Return true when TOOL-NAME is the live Lisp evaluation tool."
-  (string= "lisp_eval" (normalize-tool-name tool-name)))
+  "Return true when TOOL-NAME evaluates arbitrary Common Lisp."
+  (member (normalize-tool-name tool-name)
+          '("lisp_eval" "live_lisp_eval")
+          :test #'string=))
 
-(defun lisp-eval-recovery-mode (args)
-  "Return the lisp_eval mode as a durable string."
-  (let ((mode (or (ignore-errors (tool-arg args :mode "mode")) "live")))
+(defun lisp-eval-recovery-mode (args &optional tool-name)
+  "Return the Lisp evaluation mode as a durable string."
+  (let ((mode (if (and tool-name
+                       (string= "live_lisp_eval"
+                                (normalize-tool-name tool-name)))
+                  "live"
+                  (or (ignore-errors (tool-arg args :mode "mode"))
+                      "live"))))
     (cond
       ((symbolp mode) (string-downcase (symbol-name mode)))
       ((stringp mode) (string-downcase mode))
@@ -990,7 +997,7 @@ Failures while journaling are logged but never abort tool execution."
 (defun lisp-eval-recovery-context (tool-name args)
   "Return semantic recovery context for lisp_eval ARGS, or NIL."
   (when (lisp-eval-tool-p tool-name)
-    (list :mode (lisp-eval-recovery-mode args)
+    (list :mode (lisp-eval-recovery-mode args tool-name)
           :package (or (ignore-errors (tool-arg args :package "package"))
                        *lisp-eval-default-package*)
           :code (or (ignore-errors (tool-arg args :code "code")) ""))))
@@ -1106,14 +1113,17 @@ are journaled before control returns to the provider loop."
 (defun interactive-tool-execution-policy (name args)
   "Return the owner policy for interactive tool NAME and ARGS.
 
-Provider-driven live lisp_eval is refused because arbitrary evaluation can
-block or terminate the CLIM frame process.  Its isolated worker-process mode
-remains ordinary background work; live evaluation remains available through
-the listener or direct Lisp API."
+Provider-driven lisp_eval is restricted to its isolated worker mode.
+live_lisp_eval is an explicit dangerous escape hatch that runs frame-owned in
+the active UI image, where arbitrary code can hang, corrupt, or terminate the
+user's session.  Explicit UI actions may also retain Lisp code and run it later
+from a user gesture."
   (let* ((normalized-name (normalize-tool-name name))
          (definition (effective-tool-definition normalized-name))
          (declared (and definition (tool-definition-execution definition))))
     (cond
+      ((string= normalized-name "live_lisp_eval")
+       :frame)
       ((and (string= normalized-name "lisp_eval")
             (string= (lisp-eval-recovery-mode args) "isolated"))
        :background)
@@ -1452,7 +1462,7 @@ E.g., (lisp_eval
 
 (deftool execute-lisp-eval
   :name "lisp_eval"
-  :description "Evaluate one Common Lisp form in an isolated SBCL worker. Provider calls must pass mode=isolated. Live evaluation remains a listener/direct Lisp operation because arbitrary code can block or terminate the UI process."
+  :description "Evaluate one Common Lisp form in an isolated SBCL worker. Provider calls must pass mode=isolated; use live_lisp_eval only when access to the running RPLACA image is essential."
   :call-style :raw-args
   :execution :command-only
   :args ((code :type "string"
@@ -1462,10 +1472,30 @@ E.g., (lisp_eval
                   :description "Lisp data :package, the package name used while reading and evaluating :code. Default: RPLACA.")
          (mode :type "string"
                :required nil
-               :description "Provider calls must specify isolated, which evaluates in a fresh SBCL worker process. Live mode is refused for provider calls and remains available through the listener/direct Lisp API.")
+               :description "Provider calls must specify isolated, which evaluates in a fresh SBCL worker process. Live mode is refused; use live_lisp_eval explicitly instead.")
          (timeout :type "integer"
                   :required nil
                   :description "Timeout in seconds for isolated mode. Default: 10.")))
+
+(defun execute-live-lisp-eval-tool (args)
+  "Dangerously evaluate one form in the active RPLACA image."
+  (let ((code (tool-arg args :code "code"))
+        (package-name (or (tool-arg args :package "package")
+                          *lisp-eval-default-package*)))
+    (unless code
+      (error "code parameter is required"))
+    (lispi::execute-live-lisp-eval code package-name)))
+
+(deftool execute-live-lisp-eval-tool
+  :name "live_lisp_eval"
+  :description "DANGER: Evaluate one Common Lisp form directly in the running RPLACA UI image and return its values/output. Use only when live application state is essential. Prefer read-only introspection and small bounded forms. This has no timeout or isolation: code can mutate or corrupt state, block the UI, deadlock, exhaust resources, terminate RPLACA, or lose the user's unsaved session. Never use it to test uncertain or destructive code; use lisp_eval first whenever possible."
+  :call-style :raw-args
+  :execution :frame
+  :args ((code :type "string"
+               :description "Arbitrary Common Lisp code to evaluate in the live RPLACA process. Keep it read-only, bounded, and non-blocking whenever possible.")
+         (package :type "string"
+                  :required nil
+                  :description "Package used while reading and evaluating code. Default: RPLACA.")))
 
 (defun init-tools ()
   "Register the default rplaca built-in tools.
