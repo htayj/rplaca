@@ -15,7 +15,7 @@ before moving configuration or sessions.
 
 Anyone who has used Emacs before knows the benefit of a tight feedback loop. Write lisp code, eval it, instant results. RPLACA brings that same philosophy to agentic programming: the tighter the feedback loop between you and the agent, and the more the agent can introspect its own environment, the more powerful the collaboration becomes.
 
-RPLACA is a Lisp-native, Emacs-inspired LLM chat interface written entirely in Common Lisp. It gives you and your AI agent a shared, programmable environment while keeping provider work off the CLIM frame process. The agent can read, write, and edit files directly through Lisp data mode, and it can use isolated =lisp_eval= workers to test Common Lisp without freezing or terminating the live UI.
+RPLACA is a Lisp-native, Emacs-inspired LLM chat interface written entirely in Common Lisp. It gives you and your AI agent a shared, programmable environment while keeping ordinary provider work off the CLIM frame process. Explicit UI tools cross onto the frame process at its managed update boundary. The agent can read, write, and edit files directly through Lisp data mode, use isolated =lisp_eval= workers, attach live Lisp buttons, and open independent windows.
 
 #+ATTR_ORG: :width 800
 [[file:docs/img/genera-style.png]]
@@ -46,15 +46,17 @@ OpenAI Codex auth follows Codex's own credential layout:
 The default built-in agent tool surface follows Pi-style coding tools, with
 provider tools as the primary action surface:
 
-| Tool            | Description                          |
-|-----------------+--------------------------------------|
-| =read=          | Read text files                      |
-| =find=          | Search files by name or wildcard     |
-| =grep=          | Search file contents by literal text |
-| =write=         | Create or overwrite text files       |
-| =edit=          | Replace exact text in text files     |
-| =lisp_eval=     | Evaluate Common Lisp in an isolated worker (=mode=isolated= required for provider calls) |
-| =recovery_list= | Inspect recent durable tool/eval/checkpoint journal events |
+| Tool                 | Description                          |
+|----------------------+--------------------------------------|
+| =read=               | Read text files                      |
+| =find=               | Search files by name or wildcard     |
+| =grep=               | Search file contents by literal text |
+| =write=              | Create or overwrite text files       |
+| =edit=               | Replace exact text in text files     |
+| =lisp_eval=          | Evaluate Common Lisp in an isolated worker (=mode=isolated= required for provider calls) |
+| =attach_lisp_button= | Add a transcript button that evaluates arbitrary live Lisp when clicked |
+| =open_window=        | Open an independent McCLIM text window |
+| =recovery_list=      | Inspect recent durable tool/eval/checkpoint journal events |
 
 RPLACA is a full-trust application. Agent tools, package code, init files,
 shell commands, and live Lisp all run with the operating-system authority of
@@ -76,8 +78,9 @@ are evaluated.
 The =lisp_eval= tool is the fallback for Common Lisp tests and isolated
 introspection when no exposed tool fits. Provider calls must pass
 =:mode "isolated"=; live evaluation is refused at the provider boundary because
-arbitrary code can block or terminate the CLIM frame process. Trusted users can
-still use the listener or direct Lisp API for deliberate live evaluation. Standard
+arbitrary immediate code can block or terminate the CLIM frame process. The
+=attach_lisp_button= tool deliberately stores arbitrary live Lisp for a later
+user click, without an approval prompt or allowlist. Standard
 Common Lisp reference lookup is available through a vendored offline snapshot of
 =cl-community-spec=, and imported library discovery is handled locally through
 ASDF metadata, package exports, docstrings, and source/doc search helpers.
@@ -285,7 +288,7 @@ window.
 | Key           | Action                       |
 |---------------+------------------------------|
 | =C-x n=        | New buffer                   |
-| =C-x l=        | New listener buffer          |
+| =C-x l=        | Open native McCLIM Listener  |
 | =C-x k=        | Kill buffer                  |
 | =C-x b=        | Buffer selector (minibuffer) |
 | =C-x C-b=      | Buffer selector (minibuffer) |
@@ -383,8 +386,10 @@ normal buffer-kill commands, and lasts only until RPLACA exits.
 
 ** Listener and Manuals
 
-RPLACA includes a Lisp listener buffer (=C-x l=) for direct evaluation,
-comma commands, and =#!=-prefixed shell commands, plus an Info/manual browser.
+RPLACA opens McCLIM's native Listener application (=C-x l=) in its own window
+for direct evaluation, Listener commands, graphical presentations, and
+=#!=-prefixed shell commands. The older RPLACA listener-buffer data model is
+retained for loading existing sessions but is no longer opened by =C-x l=.
 =C-h i= opens the system Info directory, and =C-h I= opens the RPLACA manual
 buffer placeholder or manual when one is installed.
 
@@ -421,11 +426,6 @@ Checked in the working directory first, then =~/.config/rplaca/=. Compatible wit
 
 This launches RPLACA in a Guix container with all dependencies (SBCL, McCLIM, OpenSSL, fonts) automatically provisioned. Quicklisp is bootstrapped on first run.
 
-A native, non-container launcher is also available for machines with local SBCL
-and GUI dependencies installed:
-
-#+begin_src sh
-./run-native.sh
 =run.sh= and =run-native.sh= also supervise fatal crashes. After RPLACA
 publishes a private crash report and repair request, the launcher starts a fresh
 non-interactive Codex session inside the dedicated Guix repair container, gives
@@ -439,6 +439,11 @@ chain by default; repeated failure stops the loop and leaves all evidence under
 JSONL events, and errors are echoed into the terminal that launched RPLACA as
 well as retained in the per-attempt logs.
 
+A native, non-container launcher is also available for machines with local SBCL
+and GUI dependencies installed:
+
+#+begin_src sh
+./run-native.sh
 #+end_src
 
 Native runs need SBCL, a Quicklisp-compatible setup file, OpenSSL, X11 client
@@ -535,6 +540,11 @@ OpenRouter routes; RPLACA does not provide direct adapters for them.
 
 ** User Init File
 
+The =openai-codex= model selector includes =gpt-6-astra=, using the existing
+Responses API transport with =low=, =medium=, =high=, =xhigh=, and =max=
+reasoning. Astra does not support =none= reasoning; see the
+[[https://developers.openai.com/api/docs/models/gpt-6-astra][official model documentation]].
+
 Customize RPLACA by creating =~/.rplaca.d/init.lisp=:
 
 #+begin_src lisp
@@ -553,11 +563,6 @@ Customize RPLACA by creating =~/.rplaca.d/init.lisp=:
  :provider :openai-codex
  :model "gpt-5.6-sol"
  :think-level "high"
-The =openai-codex= model selector includes =gpt-6-astra=, using the existing
-Responses API transport with =low=, =medium=, =high=, =xhigh=, and =max=
-reasoning. Astra does not support =none= reasoning; see the
-[[https://developers.openai.com/api/docs/models/gpt-6-astra][official model documentation]].
-
  :core-prompt "Use lisp_eval only with mode=isolated for concrete work. Inspect first, then modify."
  :personality-prompt "You are a concise writing partner focused on structure and tone.")
 

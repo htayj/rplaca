@@ -14,6 +14,76 @@
               ,@body)
          (setf (symbol-function ',name) ,original)))))
 
+(test rplaca-default-text-style-is-portably-fixed-width
+  "The pane-construction default uses CLIM's logical fixed-width family."
+  (multiple-value-bind (family face size)
+      (clim:text-style-components rplaca::*rplaca-default-text-style*)
+    (is (eq :fix family))
+    (is (eq :roman face))
+    (is (eq :normal size))))
+
+(test agent-ui-tools-are-provider-callable-frame-actions
+  "The built-in agent UI surface advertises both operations at frame affinity."
+  (dolist (entry '(("attach_lisp_button" . rplaca::attach-agent-lisp-button-tool)
+                   ("open_window" . rplaca::open-agent-window-tool)))
+    (let ((metadata (find-agent-tool-metadata (cdr entry))))
+      (is-true metadata)
+      (when metadata
+        (is (string= (car entry) (agent-tool-metadata-name metadata)))
+        (is (eq :frame (agent-tool-metadata-execution metadata)))))))
+
+(test attach-lisp-button-tool-persists-arbitrary-action-data
+  "The frame tool adds display metadata without evaluating its Lisp."
+  (let* ((initial-print-base *print-base*)
+         (buffer (make-buffer "agent-button"
+                              :session-persistence-mode :ephemeral))
+         (rplaca::*current-tool-buffer* buffer)
+         (result
+           (rplaca::attach-agent-lisp-button-tool
+            '((:label . "Do it")
+              (:code . "(setf *print-base* 16)")
+              (:package . "RPLACA"))))
+         (message (car (last (test-buffer-history-messages buffer))))
+         (spec (rplaca::agent-lisp-button-spec message)))
+    (is (search ":ATTACHED" (string-upcase result)))
+    (is (string= "Agent action available:" (message-text message)))
+    (is (string= "Do it"
+                 (rplaca::agent-lisp-button-value spec :label)))
+    (is (string= "(setf *print-base* 16)"
+                 (rplaca::agent-lisp-button-value spec :code)))
+    (is (= initial-print-base *print-base*))))
+
+(test clicking-agent-lisp-button-runs-live-eval-and-reports-result
+  "Button activation executes the stored code with its buffer and package."
+  (let* ((buffer (make-buffer "agent-button-click"
+                              :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame
+                 'rplaca::rplaca-chat-frame :buffer buffer))
+         (captured nil)
+         (redisplays 0)
+         (spec '((:label . "Calculate")
+                 (:code . "(+ 20 22)")
+                 (:package . "RPLACA"))))
+    (with-mcclim-test-function-override
+        (rplaca::execute-tool-safely (name args &key buffer tool-id)
+          (declare (ignore tool-id))
+          (setf captured (list name args buffer))
+          "(:values (42))")
+      (with-mcclim-test-function-override
+          (rplaca::request-chat-frame-redisplay (requested-frame)
+            (is (eq frame requested-frame))
+            (incf redisplays))
+        (is (string= "(:values (42))"
+                     (rplaca::execute-agent-lisp-button frame spec)))))
+    (is (string= "lisp_eval" (first captured)))
+    (is (eq buffer (third captured)))
+    (is (string= "live" (cdr (assoc :mode (second captured)))))
+    (is (= 1 redisplays))
+    (is-true
+     (some (lambda (message)
+             (search "Button Calculate returned" (message-text message)))
+           (test-buffer-history-messages buffer)))))
+
 (defun handle-chat-appearance-activation-with-fake-port (frame candidate port)
   "Run one frame-process activation through a deterministic opaque port seam."
   (with-mcclim-test-function-override
@@ -845,6 +915,40 @@ these tests exercise construction-time space requirements only."
         (is-false constructor-called-p)
         (is (= 0 (rplaca::message-help-active-count-snapshot)))
         (is (string= "message-help-admission-refused" debug-event))))))
+
+(test agent-window-tool-hands-title-and-content-to-independent-frame
+  "The provider tool opens through the frame-owned application helper."
+  (let ((captured nil))
+    (with-mcclim-test-function-override
+        (rplaca::open-agent-window (title content)
+          (setf captured (list title content))
+          :synthetic-frame)
+      (let ((result
+              (rplaca::open-agent-window-tool
+               '((:title . "Agent Notes")
+                 (:content . "Hello from the agent.")))))
+        (is (search ":OPENED" (string-upcase result)))))
+    (is (equal '("Agent Notes" "Hello from the agent.") captured))))
+
+(test agent-window-reservation-covers-independent-frame-lifetime
+  "Agent windows participate in the same safe-reload lifetime accounting."
+  (let ((worker-function nil)
+        (rplaca::*message-help-runtime-reservations*
+          (make-hash-table :test #'eq)))
+    (with-mcclim-test-function-override
+        (rplaca::make-agent-window-frame (title content)
+          (is (string= "Agent Window" title))
+          (is (string= "content" content))
+          :synthetic-agent-frame)
+      (with-mcclim-test-function-override
+          (rplaca::make-agent-window-worker-thread (function)
+            (setf worker-function function)
+            :synthetic-worker)
+        (is (eq :synthetic-agent-frame
+                (rplaca::open-agent-window "Agent Window" "content")))
+        (is (= 1 (rplaca::message-help-active-count-snapshot)))
+        (funcall worker-function)
+        (is (= 0 (rplaca::message-help-active-count-snapshot)))))))
 
 (test chat-recurse-launch-failure-is-contained-at-command-boundary
   "A child-process launch failure is visible but cannot unwind the chat frame."

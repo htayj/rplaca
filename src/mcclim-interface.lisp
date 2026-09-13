@@ -4,8 +4,66 @@
 ;;; Fresh McCLIM Chat Interface
 ;;; --------------------------------------------------------------------------
 
+(defparameter *rplaca-default-text-style*
+  (clim:make-text-style :fix :roman :normal)
+  "Portable fixed-width text style inherited by RPLACA's application panes.")
+
 (clim:define-presentation-type chat-message ()
   :inherit-from 'message)
+
+(defparameter +agent-lisp-button-metadata-key+ :agent-lisp-button)
+
+(defun agent-lisp-button-spec (message)
+  "Return MESSAGE's persisted agent-created Lisp button specification."
+  (let ((metadata (message-metadata message)))
+    (and metadata
+         (message-metadata-value metadata
+                                 +agent-lisp-button-metadata-key+))))
+
+(defun agent-lisp-button-value (spec key)
+  "Return KEY from persisted button SPEC without assuming keyword identity."
+  (or (cdr (assoc key spec :test #'eq))
+      (cdr (assoc (string-downcase (symbol-name key)) spec
+                  :test (lambda (name candidate)
+                          (string= name (string-downcase (string candidate))))))))
+
+(defun execute-agent-lisp-button (frame spec)
+  "Run arbitrary Lisp retained by SPEC after an explicit user activation."
+  (let* ((buffer (chat-frame-buffer frame))
+         (label (or (agent-lisp-button-value spec :label) "Lisp action"))
+         (code (agent-lisp-button-value spec :code))
+         (package (or (agent-lisp-button-value spec :package) "RPLACA"))
+         (result
+           (let ((*current-caller* :user)
+                 (*current-tool-buffer* buffer))
+             (execute-tool-safely
+              "lisp_eval"
+              `((:code . ,code)
+                (:package . ,package)
+                (:mode . "live"))
+              :buffer buffer))))
+    (buffer-insert-system-message
+     buffer
+     (format nil "[Button ~A returned]~%~A" label result))
+    (request-chat-frame-redisplay frame)
+    result))
+
+(defun display-agent-lisp-button (frame stream spec)
+  "Render SPEC as an ordinary CLIM push-button gadget in STREAM."
+  (let ((label (or (agent-lisp-button-value spec :label) "Run Lisp"))
+        (frame-manager (clim:frame-manager frame)))
+    (clim:with-look-and-feel-realization (frame-manager frame)
+      (clim:with-output-as-gadget (stream)
+        (clim:make-pane
+         'clim:push-button
+         :label label
+         :client frame
+         :id spec
+         :activate-callback
+         (lambda (gadget)
+           (execute-agent-lisp-button
+            (clim:gadget-client gadget)
+            (clim:gadget-id gadget))))))))
 
 (clim:define-presentation-method clim:presentation-typep
     (object (type chat-message))
@@ -502,10 +560,78 @@ instead of parking behind Safe Reload and deadlocking a frame barrier."
    (help :application
          :display-function 'display-message-help
          :display-time :command-loop
+         :text-style *rplaca-default-text-style*
          :width 520
          :height 360))
   (:layouts
    (default help)))
+
+(clim:define-application-frame rplaca-agent-window-frame ()
+  ((content :initarg :content :reader agent-window-content))
+  (:panes
+   (content :application
+            :display-function 'display-agent-window
+            :display-time :command-loop
+            :text-style *rplaca-default-text-style*
+            :width 640
+            :height 480))
+  (:layouts
+   (default content)))
+
+(defun display-agent-window (frame stream)
+  "Display the agent-supplied content owned by FRAME."
+  (write-string (agent-window-content frame) stream))
+
+(defun make-agent-window-worker-thread (function)
+  "Create the worker that owns one independent agent-created frame."
+  (bt:make-thread function :name "rplaca agent window"))
+
+(defun make-agent-window-frame (title content)
+  "Construct one independent application frame with TITLE and CONTENT."
+  (clim:make-application-frame
+   'rplaca-agent-window-frame
+   :content content
+   :pretty-name title))
+
+(defun open-agent-window (title content)
+  "Open a one-pane application frame and return it, or NIL on failure."
+  (let ((reservation
+          (handler-case
+              (reserve-message-help-runtime)
+            (error (condition)
+              (file-debug-event
+               "agent-window-admission-error"
+               :condition (format nil "~A" condition))
+              (return-from open-agent-window nil))))
+        (frame nil))
+    (setf frame
+          (handler-case
+              (make-agent-window-frame title content)
+            (error (condition)
+              (release-message-help-runtime reservation)
+              (file-debug-event
+               "agent-window-frame-construction-error"
+               :condition (format nil "~A" condition))
+              (return-from open-agent-window nil))))
+    (handler-case
+        (let ((worker-reservation reservation))
+          (make-agent-window-worker-thread
+           (lambda ()
+             (unwind-protect
+                  (handler-case
+                      (clim:run-frame-top-level frame)
+                    (error (condition)
+                      (file-debug-event
+                       "agent-window-frame-error"
+                       :condition (format nil "~A" condition))))
+               (release-message-help-runtime worker-reservation))))
+          frame)
+      (error (condition)
+        (release-message-help-runtime reservation)
+        (file-debug-event
+         "agent-window-thread-start-error"
+         :condition (format nil "~A" condition))
+        nil))))
 
 (defun display-message-help (frame stream)
   "Display FRAME's message metadata in STREAM."
@@ -1854,6 +1980,7 @@ pixels or private McCLIM state as the contract."
   ;; switching top-level categories disowns that submenu frame.  Keep the full
   ;; hierarchical command table above for M-x and keys, but attach a separate
   ;; public-CLIM leaf-only table to the visible bar so ordinary pointer motion
+                 :text-style *rplaca-default-text-style*
   ;; never creates or disowns transient submenu frames.
   (:menu-bar rplaca-chat-menu-bar)
   (:panes
@@ -1864,11 +1991,13 @@ pixels or private McCLIM state as the contract."
                  :display-time :command-loop
                  :incremental-redisplay t
                  :end-of-page-action :allow
+     :text-style *rplaca-default-text-style*
                  :width 900
                  :height 640
                  :command-table 'rplaca-chat-frame)))
       (setf (esa:windows clim:*application-frame*) (list pane))
       pane))
+     :text-style *rplaca-default-text-style*
    (info
     (clim:make-pane
      'rplaca-chat-info-pane
@@ -1887,6 +2016,7 @@ pixels or private McCLIM state as the contract."
      :height (chat-compose-desired-pixel-height)
      :min-height (chat-compose-desired-pixel-height)
      :max-height (chat-compose-desired-pixel-height)
+                    :text-style *rplaca-default-text-style*
      :end-of-line-action :wrap*
      :minibuffer nil
      :scroll-bars nil
@@ -2883,14 +3013,18 @@ this is the standard CLIM composition used by WITH-TEXT-STYLE."
 (defun display-chat-message (frame stream msg)
   "Display MSG as one chat-message presentation on STREAM."
   (let ((sender (chat-message-label msg))
-        (text (message-text msg)))
+        (text (message-text msg))
+        (button (agent-lisp-button-spec msg)))
     (clim:with-output-as-presentation
         (stream msg 'chat-message :single-box t)
       (call-with-chat-appearance-role
        frame stream (chat-message-appearance-role-stack msg)
        (lambda ()
          (format stream "~A>~%" sender)
-         (write-string text stream))))
+         (write-string text stream)
+         (when button
+           (terpri stream)
+           (display-agent-lisp-button frame stream button)))))
     (terpri stream)
     (terpri stream)))
 
@@ -2933,6 +3067,68 @@ this is the standard CLIM composition used by WITH-TEXT-STYLE."
     (flet ((emit ()
              (let ((profile (getf entry :appearance-profile))
                    (role-stack (getf entry :role-stack)))
+(defun attach-agent-lisp-button-tool (args)
+  "Attach an agent-created Lisp button to the current chat transcript."
+  (let ((buffer *current-tool-buffer*)
+        (label (tool-arg args :label "label"))
+        (code (tool-arg args :code "code"))
+        (package (or (tool-arg args :package "package") "RPLACA")))
+    (unless buffer
+      (error "attach_lisp_button requires an active chat buffer"))
+    (unless (and (stringp label) (plusp (length label)))
+      (error "attach_lisp_button requires a non-empty label"))
+    (unless (and (stringp code) (plusp (length code)))
+      (error "attach_lisp_button requires non-empty Lisp code"))
+    (unless (and (stringp package) (find-package package))
+      (error "Unknown Lisp package ~S" package))
+    (buffer-insert-system-message
+     buffer
+     "Agent action available:"
+     :metadata
+     (list
+      (cons +agent-lisp-button-metadata-key+
+            `((:label . ,(copy-seq label))
+              (:code . ,(copy-seq code))
+              (:package . ,(copy-seq package))))))
+    (lisp-data-string
+     (list :status :attached :label label :package package))))
+
+(deftool attach-agent-lisp-button-tool
+  :name "attach_lisp_button"
+  :description "Attach a real clickable CLIM push button to the transcript. When the user clicks it, RPLACA evaluates the supplied arbitrary Common Lisp code in the live UI process. The RPLACA container is the authority boundary; no approval or Lisp allowlist is applied."
+  :call-style :raw-args
+  :execution :frame
+  :args ((label :type "string"
+                :description "Visible button label.")
+         (code :type "string"
+               :description "Arbitrary Common Lisp code evaluated only when the user clicks the button.")
+         (package :type "string"
+                  :required nil
+                  :description "Package used to read and evaluate code. Default: RPLACA.")))
+
+(defun open-agent-window-tool (args)
+  "Open an independent text window requested by the current agent."
+  (let ((title (tool-arg args :title "title"))
+        (content (tool-arg args :content "content")))
+    (unless (and (stringp title) (plusp (length title)))
+      (error "open_window requires a non-empty title"))
+    (unless (stringp content)
+      (error "open_window requires string content"))
+    (unless (open-agent-window title content)
+      (error "Unable to open agent window ~S" title))
+    (lisp-data-string
+     (list :status :opened :title title))))
+
+(deftool open-agent-window-tool
+  :name "open_window"
+  :description "Open a new independent RPLACA/McCLIM application window with an agent-supplied title and text content. The window is owned by its own frame top-level and remains independent of the chat frame."
+  :call-style :raw-args
+  :execution :frame
+  :args ((title :type "string"
+                :description "Window title.")
+         (content :type "string"
+                  :description "Text displayed in the new window.")))
+
                (if (and profile role-stack)
                    (call-with-appearance-profile-role
                     frame stream profile role-stack
@@ -5345,8 +5541,8 @@ remaining buffers from being cancelled, or leave the frame marked running."
   "Run the fresh McCLIM chat frame for BUFFER using an immutable startup profile.
 
 The initial :CLASSIC profile is deliberately passed as frame construction data.
-It does not select a port, install named fonts, change pane defaults, or alter
-the existing Drei/ESA pane declarations."
+It does not select a port, install named fonts, or alter the fixed-width pane
+default shared by the Drei/ESA pane declarations."
   (let ((frame (clim:make-application-frame
                 'rplaca-chat-frame
                 :buffer buffer

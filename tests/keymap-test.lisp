@@ -108,10 +108,25 @@
           (keymap-lookup *default-keymap* (list :ctrl-x (code-char 18))))))
 
 (test default-keymap-listener-binding
-  "Default keymap binds C-x l to the in-buffer Lisp listener."
+  "Default keymap binds C-x l to the native McCLIM Listener command."
   (rplaca::init-default-keymap)
   (is (eq 'rplaca::new-listener-buffer-command
           (keymap-lookup *default-keymap* '(:ctrl-x #\l)))))
+
+(test new-listener-buffer-command-opens-native-mcclim-listener
+  "The historical command name launches McCLIM's real Listener frame."
+  (let ((captured-arguments nil))
+    (with-mcclim-test-function-override
+        (clim-listener:run-listener (&rest arguments)
+          (setf captured-arguments arguments)
+          (values :listener-process :listener-frame))
+      (is (eq :listener-frame
+              (rplaca::new-listener-buffer-command nil))))
+    (is-true (getf captured-arguments :new-process))
+    (is (string= "RPLACA McCLIM Listener"
+                 (getf captured-arguments :process-name)))
+    (is (string= (rplaca::listener-default-package-name)
+                 (getf captured-arguments :package)))))
 
 (test file-keymap-emacs-editor-bindings
   "File buffers have Emacs-style editor bindings over the global keymap."

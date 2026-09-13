@@ -3,7 +3,7 @@
   :homepage "https://github.com/htayj/rplaca"
   :version "0.1.0"
   :licence "AGPL-3.0-only"
-  :depends-on ("lispi" "mcclim" "esa-mcclim" "drei-mcclim"
+  :depends-on ("lispi" "mcclim" "clim-listener" "clim-debugger" "esa-mcclim" "drei-mcclim"
                "coalton" "alexandria" "drakma" "cl-json" "bordeaux-threads"
                "chipz")
   :serial t

@@ -293,8 +293,10 @@ compose live typography is forbidden pending a Drei stress proof.
 ### 5.1 `:classic`
 
 `:classic` is a behavioral golden profile, not a repaint of backend defaults.
-It must not pass `:foreground`, `:background`, or `:text-style` overrides to
-pane construction. Existing current output values remain exact:
+It must not pass `:foreground` or `:background` overrides to pane construction.
+All RPLACA application panes independently use the portable CLIM logical
+`(:fix :roman :normal)` text style as their construction default, including
+the Drei compose pane. Existing current output color values remain exact:
 
 | Current output | Existing value |
 |---|---|

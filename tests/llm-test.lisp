@@ -404,8 +404,8 @@
            (tools (coerce (rplaca::tool-definitions-for-api) 'list))
            (tool-names (sort (mapcar (lambda (tool) (cdr (assoc :name tool))) tools)
                              #'string<)))
-      (is (equal '("edit" "find" "grep" "lisp_eval" "live_lisp_eval"
-                   "read" "recovery_list" "write")
+      (is (equal '("attach_lisp_button" "edit" "find" "grep" "lisp_eval" "live_lisp_eval"
+                   "open_window" "read" "recovery_list" "write")
                  tool-names))
       (is (string= "RPLACA" rplaca:*lisp-eval-default-package*))
       (dolist (name '("read" "find" "grep" "write" "edit" "lisp_eval"))
@@ -426,8 +426,8 @@
            (tool-names (mapcar (lambda (tool)
                                  (cdr (assoc :name tool)))
                                tools)))
-      (is (equal '("edit" "find" "grep" "lisp_eval" "live_lisp_eval"
-                   "read" "recovery_list" "write")
+      (is (equal '("attach_lisp_button" "edit" "find" "grep" "lisp_eval" "live_lisp_eval"
+                   "open_window" "read" "recovery_list" "write")
                  tool-names)))))
 
 (test mcclim-provider-live-lisp-eval-refusal-continues-tool-loop
@@ -1216,7 +1216,7 @@
                                        (cdr (assoc :name tool)))
                                      tools)
                              #'string<)))
-      (is (equal '("lisp_eval" "live_lisp_eval" "recovery_list")
+      (is (equal '("attach_lisp_button" "lisp_eval" "live_lisp_eval" "open_window" "recovery_list")
                  tool-names))
       (is (not (null (gethash "lisp_eval" rplaca::*tool-table*))))
       (is-false (member "read" tool-names :test #'string=)))))
@@ -1240,7 +1240,7 @@
                                        (cdr (assoc :name tool)))
                                      tools)
                              #'string<)))
-      (is (equal '("lisp_eval" "live_lisp_eval" "read" "recovery_list")
+      (is (equal '("attach_lisp_button" "lisp_eval" "live_lisp_eval" "open_window" "read" "recovery_list")
                  tool-names))
       (is (string= "user-read"
                    (rplaca:execute-tool "read" nil))))))
@@ -1268,7 +1268,7 @@
                                        (cdr (assoc :name tool)))
                                      tools)
                              #'string<)))
-      (is (equal '("lisp_eval" "live_lisp_eval" "read" "recovery_list")
+      (is (equal '("attach_lisp_button" "lisp_eval" "live_lisp_eval" "open_window" "read" "recovery_list")
                  tool-names))
       (is (string= "user-read"
                    (rplaca:execute-tool "read" nil))))))
@@ -1588,8 +1588,8 @@
            (tools (coerce (rplaca::tool-definitions-for-api) 'list))
            (tool-names (sort (mapcar (lambda (tool) (cdr (assoc :name tool))) tools)
                              #'string<)))
-      (is (equal '("custom_probe" "edit" "find" "grep" "lisp_eval"
-                   "live_lisp_eval" "read" "recovery_list" "write")
+      (is (equal '("attach_lisp_button" "custom_probe" "edit" "find" "grep" "lisp_eval"
+                   "live_lisp_eval" "open_window" "read" "recovery_list" "write")
                  tool-names))
       (is (not (null (gethash "custom_probe" rplaca::*tool-table*))))
       (is (not (null (gethash "lisp_eval" rplaca::*tool-table*)))))))

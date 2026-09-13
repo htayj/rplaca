@@ -120,28 +120,28 @@ redefinition has ended.  FUNCTION may acquire the operation's inner lock."
 
 (defvar *message-help-runtime-lock*
   (bt:make-lock "rplaca message help runtime")
-  "Lock guarding active independent message-help frame reservations.")
+  "Lock guarding active independent auxiliary-frame reservations.")
 
 (defvar *message-help-runtime-reservations* (make-hash-table :test #'eq)
-  "Exact reservations for help-frame construction and top-level lifetimes.")
+  "Exact reservations for auxiliary-frame construction and top-level lifetimes.")
 
 (defun message-help-active-count-snapshot ()
-  "Return the number of constructing or running independent help frames."
+  "Return the number of constructing or running independent auxiliary frames."
   (bt:with-lock-held (*message-help-runtime-lock*)
     (hash-table-count *message-help-runtime-reservations*)))
 
 (defun reserve-message-help-runtime ()
-  "Atomically reserve one help-frame lifetime against live reload."
+  "Atomically reserve one auxiliary-frame lifetime against live reload."
   (let ((token (cons :message-help (gensym "RUNTIME-"))))
     (call-with-runtime-admission
      (lambda ()
        (bt:with-lock-held (*message-help-runtime-lock*)
          (setf (gethash token *message-help-runtime-reservations*) t))
        token)
-     :operation "a message metadata help frame")))
+     :operation "an independent auxiliary frame")))
 
 (defun release-message-help-runtime (token)
-  "Release exact help-frame runtime TOKEN idempotently."
+  "Release exact auxiliary-frame runtime TOKEN idempotently."
   (when token
     (bt:with-lock-held (*message-help-runtime-lock*)
       (remhash token *message-help-runtime-reservations*))))

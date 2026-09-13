@@ -2172,10 +2172,10 @@ documentation in *extended-docs*."
 
 (defdoc new-listener-buffer-command
   :category "buffer-command"
-  :usage "Bound to C-x l. Creates or switches to the Common Lisp listener buffer."
-  :returns "buffer — The selected listener buffer."
-  :side-effects "May create a listener buffer and switches the current buffer."
-  :see-also (ensure-listener-buffer make-listener-buffer submit-listener-input))
+  :usage "Bound to C-x l. Opens McCLIM's native Listener application."
+  :returns "application-frame — The newly opened McCLIM Listener frame."
+  :side-effects "Starts the Listener frame top level in a new process."
+  :see-also (clim-listener:run-listener))
 
 (defdoc kill-buffer-command
   :category "buffer-command"

@@ -1164,8 +1164,8 @@
                         (test-buffer-history-messages buffer)))))
           (bt:signal-semaphore release))))))
 
-(test generic-frame-owned-tool-is-refused-at-provider-boundary
-  "Blocking frame tools cannot fall through to the CLIM updater."
+(test frame-owned-tool-executes-at-the-provider-update-boundary
+  "Frame tools run only when the CLIM updater applies their pending state."
   (with-tool-table-restored
     (let ((calls 0)
           (execution-thread nil))
@@ -1191,14 +1191,17 @@
           (rplaca::begin-tool-calls
            buffer
            (list (test-tool-use "frame-call" "frame_owned_test")))
-          (is (null (buffer-pending-tool-execution buffer)))
+          (is-true (buffer-pending-tool-execution buffer))
           (is (= 0 calls))
           (is (null execution-thread))
-          (is-false
+          (is-true (rplaca::update-interactive-tool-execution buffer))
+          (is (= 1 calls))
+          (is (eq execution-thread (bt:current-thread)))
+          (is-true
            (some (lambda (message)
                    (search "frame-owned effect" (message-text message)))
                  (test-buffer-history-messages buffer)))
-          (is-true
+          (is-false
            (some (lambda (message)
                    (and (eq :tool-result (message-sender message))
                         (search "REFUSED"

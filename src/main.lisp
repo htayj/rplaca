@@ -1774,9 +1774,15 @@ to navigate. Shows buffer name, agent, status, and message count."
 (defcommand new-buffer-command)
 
 (defun new-listener-buffer-command (buffer)
-  "Create or switch to the Common Lisp listener buffer."
+  "Open McCLIM's native Common Lisp Listener in a new application frame."
   (declare (ignore buffer))
-  (switch-to-buffer (ensure-listener-buffer)))
+  (multiple-value-bind (process frame)
+      (clim-listener:run-listener
+       :new-process t
+       :process-name "RPLACA McCLIM Listener"
+       :package (listener-default-package-name))
+    (declare (ignore process))
+    frame))
 (defcommand new-listener-buffer-command)
 
 (defun next-buffer-command (buffer)

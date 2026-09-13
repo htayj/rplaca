@@ -1195,7 +1195,7 @@ value and never unwinds the command loop."
          (start-gate (bt:make-lock "interactive-tool-start"))
          (worker-start-error nil)
          (admission-refusal nil))
-    (when (member execution '(:command-only :frame))
+    (when (eq execution :command-only)
       (return-from start-interactive-tool-execution
         (values nil
                 (format nil
