@@ -14,7 +14,7 @@
              (merge-pathnames #P"share/common-lisp/source/cl-mcclim/"
                               profile))))
       (dolist (name '(:clim-core :clim :mcclim :mcclim-clx
-                      :esa-mcclim :drei-mcclim))
+                      :esa-mcclim :drei-mcclim :clim-debugger))
         (let* ((system (asdf:find-system name))
                (source (truename (asdf:system-source-file system))))
           (unless (uiop:subpathp source expected-root)

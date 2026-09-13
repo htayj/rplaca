@@ -684,6 +684,9 @@ def assert_no_stability_failure_signatures(session: McCLIMGuiSession) -> None:
         "menu-bar-error-recovered": "the historical menu recovery path ran",
         "redisplay-queue-failed": "a redisplay wakeup could not be queued",
         "redisplay-handler-error": "the redisplay handler contained an error",
+        "ui-action-error": "a UI action contained an error",
+        "graphical-debugger-entered": "a UI action entered the graphical debugger",
+        "graphical-debugger-failed": "the graphical debugger failed",
         "frame-cleanup-error": "frame unwind cleanup contained an error",
         "runtime-stream-cleanup-error": "stream cleanup contained an error",
         "runtime-oauth-cleanup-error": "OAuth cleanup contained an error",
@@ -1519,6 +1522,55 @@ def run_quaestor(session: McCLIMGuiSession) -> list[dict[str, Any]]:
     return screenshots
 
 
+def exercise_native_listener(session: McCLIMGuiSession) -> dict[str, Any]:
+    """Evaluate a form in the native Listener frame and quit through its command."""
+    deadline = time.monotonic() + 15.0
+    listener_id = None
+    while time.monotonic() < deadline:
+        result = session.run(
+            ["xdotool", "search", "--onlyvisible", "--name", "^Listener$"],
+            check=False)
+        candidates = [value for value in result.stdout.split()
+                      if value != session.window_id]
+        if candidates:
+            listener_id = candidates[-1]
+            break
+        time.sleep(0.1)
+    if listener_id is None:
+        raise DriverError("native McCLIM Listener window did not open")
+    session.run(["xdotool", "windowfocus", listener_id])
+    marker = session.artifact_dir / "native-listener-evaluated.txt"
+    marker.unlink(missing_ok=True)
+    pathname = str(marker).replace("\\", "\\\\").replace('"', '\\"')
+    session.type_text(
+        f'(with-open-file (s "{pathname}" :direction :output '
+        ':if-exists :supersede) (write-line "NATIVE_LISTENER_OK" s))')
+    session.press("Return")
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if marker.exists() and marker.read_text().strip() == "NATIVE_LISTENER_OK":
+            break
+        time.sleep(0.1)
+    else:
+        raise DriverError("native Listener did not evaluate the typed Lisp form")
+    screenshot = session.screenshot("native-listener-evaluation", root=True)
+    session.type_text(",Quit")
+    session.press("Return")
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        result = session.run(
+            ["xdotool", "getwindowname", listener_id], check=False)
+        if result.returncode != 0:
+            break
+        time.sleep(0.1)
+    else:
+        raise DriverError("native Listener did not close after Quit")
+    session.focus()
+    session.log_action("native_listener_evaluated_and_closed",
+                       window_id=listener_id, marker=str(marker))
+    return screenshot
+
+
 def run_keybinds(session: McCLIMGuiSession) -> list[dict[str, Any]]:
     """Exercise default keybindings through the real McCLIM/ESA GUI path."""
     screenshots = prepare_session(session)
@@ -1726,10 +1778,7 @@ def run_keybinds(session: McCLIMGuiSession) -> list[dict[str, Any]]:
     cancel_modal_input(session)
 
     expect_key_command(session, ("ctrl+x", "l"), "new-listener-buffer-command")
-    session.wait_snapshot("listener buffer opened",
-                          lambda snapshot: snapshot.get("major_mode") == "listener",
-                          timeout=10.0)
-    close_current_buffer_with_key(session)
+    screenshots.append(exercise_native_listener(session))
 
     expect_key_command(session, ("ctrl+x", "shift+f"), "font-editor-command")
     session.wait_snapshot("font editor opened",

@@ -1941,20 +1941,10 @@ pixels or private McCLIM state as the contract."
     :accessor chat-frame-compose-synchronized-buffer
     :documentation
     "Frame buffer whose draft/point/mark currently match the Drei pane.")
-   (redisplay-lock :initform (bt:make-lock "rplaca chat redisplay")
-                   :reader chat-frame-redisplay-lock)
+   (lifecycle-lock :initform (bt:make-lock "rplaca chat lifecycle")
+                   :reader chat-frame-lifecycle-lock)
    (lifecycle-state :initform :created
-                    :accessor chat-frame-lifecycle-state)
-   (redisplay-dirty-p :initform nil
-                      :accessor chat-frame-redisplay-dirty-p)
-   (redisplay-request-generation :initform 0
-                                 :accessor chat-frame-redisplay-request-generation)
-   (redisplay-reserved-generation :initform 0
-                                  :accessor chat-frame-redisplay-reserved-generation)
-   (redisplay-pending-p :initform nil
-                        :accessor chat-frame-redisplay-pending-p)
-   (redisplay-handling-p :initform nil
-                         :accessor chat-frame-redisplay-handling-p))
+                    :accessor chat-frame-lifecycle-state))
   (:command-table (rplaca-chat-frame
                    :inherit-from (esa:global-esa-table
                                   esa:keyboard-macro-table)
@@ -1980,7 +1970,6 @@ pixels or private McCLIM state as the contract."
   ;; switching top-level categories disowns that submenu frame.  Keep the full
   ;; hierarchical command table above for M-x and keys, but attach a separate
   ;; public-CLIM leaf-only table to the visible bar so ordinary pointer motion
-                 :text-style *rplaca-default-text-style*
   ;; never creates or disowns transient submenu frames.
   (:menu-bar rplaca-chat-menu-bar)
   (:panes
@@ -1991,23 +1980,24 @@ pixels or private McCLIM state as the contract."
                  :display-time :command-loop
                  :incremental-redisplay t
                  :end-of-page-action :allow
-     :text-style *rplaca-default-text-style*
+                 :text-style *rplaca-default-text-style*
                  :width 900
                  :height 640
                  :command-table 'rplaca-chat-frame)))
       (setf (esa:windows clim:*application-frame*) (list pane))
       pane))
-     :text-style *rplaca-default-text-style*
    (info
     (clim:make-pane
      'rplaca-chat-info-pane
      :master-pane nil
      :display-function 'display-chat-info-pane
+     :text-style *rplaca-default-text-style*
      :width 900))
    (compose
     (clim:make-pane
      'rplaca-chat-compose-pane
      :initial-contents ""
+     :text-style *rplaca-default-text-style*
      :ncolumns 90
      :nlines 5
      ;; Keep the normal compose geometry in the pane's original CLIM space
@@ -2016,7 +2006,6 @@ pixels or private McCLIM state as the contract."
      :height (chat-compose-desired-pixel-height)
      :min-height (chat-compose-desired-pixel-height)
      :max-height (chat-compose-desired-pixel-height)
-                    :text-style *rplaca-default-text-style*
      :end-of-line-action :wrap*
      :minibuffer nil
      :scroll-bars nil
@@ -2027,6 +2016,7 @@ pixels or private McCLIM state as the contract."
     (clim:make-pane 'rplaca-chat-minibuffer-pane
                     :display-function 'display-chat-minibuffer-pane
                     :display-time :command-loop
+                    :text-style *rplaca-default-text-style*
                     :width 900)))
   (:layouts
    (default
@@ -2596,47 +2586,100 @@ pixels or private McCLIM state as the contract."
 (register-command-metadata 'revert-staged-appearance-command)
 (register-command-metadata 'reload-appearance-file-command)
 
-(defun call-chat-frame-ui-action-safely (frame action function)
-  "Call FUNCTION as a user UI ACTION, containing ordinary application errors.
+(defvar *chat-graphical-debugger-enabled-p* t
+  "Offer McCLIM's live graphical debugger for errors in a running chat frame.
+Set to NIL for unattended embedding; ordinary error containment remains active.")
 
-Only ERROR is handled.  CLIM control conditions such as FRAME-EXIT and
-ABORT-GESTURE therefore retain their normal command-loop semantics.  Reporting
-is itself best-effort so a broken log, feedback hook, or redisplay request
-cannot turn the original action failure into a frame exit."
-  (let ((*chat-interaction-state* (chat-frame-interaction-state frame)))
-    (handler-case
-        (funcall function)
-      (error (condition)
-        (let* ((action-text
-                 (handler-case
-                     (format nil "~(~A~)" action)
-                   (error () "unknown UI action")))
-               (condition-text
-                 (handler-case
-                     (format nil "~A" condition)
-                   (error () "unprintable error")))
-               (diagnostic-text
-                 (if (> (length condition-text) 240)
-                     (concatenate 'string
-                                  (subseq condition-text 0 240)
-                                  "...")
-                     condition-text)))
-          (ignore-errors
-            (file-debug-event "ui-action-error"
-                              :action action-text
-                              :condition condition-text))
-          (ignore-errors
-            (let ((buffer (chat-frame-buffer frame)))
-              (when buffer
-                (buffer-insert-system-message
-                 buffer
-                 (format nil "[UI action failed (~A): ~A]"
-                         action-text diagnostic-text)
-                 :record-p nil
-                 :run-hook-p nil))))
-          (ignore-errors
-            (request-chat-frame-redisplay frame))
-          nil)))))
+(defvar *chat-graphical-debugger-active-p* nil
+  "Prevent a debugger failure from recursively opening another debugger.")
+
+(defun chat-frame-debugger-available-p (frame)
+  "Return true when FRAME has a usable, owning graphical event process."
+  (and *chat-graphical-debugger-enabled-p*
+       (not *chat-graphical-debugger-active-p*)
+       (eq clim:*application-frame* frame)
+       ;; McCLIM's process ownership is stronger than a dynamic frame binding,
+       ;; which an embedding caller could also establish on a worker thread.
+       (eq (climi::frame-process frame) (clim-sys:current-process))
+       (eq (chat-frame-lifecycle-state frame) :running)
+       (chat-frame-grafted-top-level-sheet frame)))
+
+(defun report-chat-frame-ui-error (frame action condition &key (notify-p t))
+  "Record an abandoned action without letting reporting cause another failure."
+  (let* ((action-text (handler-case (format nil "~(~A~)" action)
+                        (error () "unknown UI action")))
+         (condition-text
+           (let ((*print-circle* t)
+                 (*print-level* 6)
+                 (*print-length* 20))
+             (handler-case (format nil "~A" condition)
+               (error () "unprintable error"))))
+         (diagnostic-text (if (> (length condition-text) 240)
+                              (concatenate 'string (subseq condition-text 0 240) "...")
+                              condition-text)))
+    (ignore-errors
+      (file-debug-event "ui-action-error" :action action-text
+                        :condition condition-text))
+    (ignore-errors
+      (let ((buffer (chat-frame-buffer frame)))
+        (when buffer
+          (setf (buffer-status buffer) :error)
+          ;; A display error must not notify its own failing display forever.
+          (let ((*suppress-chat-redisplay-requests*
+                  (or *suppress-chat-redisplay-requests* (not notify-p))))
+            (buffer-insert-read-only-message
+             buffer :system (format nil "[UI action failed (~A): ~A]"
+                            action-text diagnostic-text)
+             :record-p nil :run-hook-p nil :notify-p notify-p)))))
+    (when notify-p
+      (ignore-errors (request-chat-frame-redisplay frame)))
+    nil))
+
+(defun call-chat-frame-ui-action-safely (frame action function &key (notify-p t))
+  "Run ACTION with live graphical restarts and a nonrecursive error fallback.
+
+HANDLER-BIND preserves the failing stack and CLIM's pane recovery restarts.
+The native debugger runs on that same thread. Closing it invokes the local
+ABORT restart, returning to the application without retrying domain effects.
+Headless callers and failures of the debugger use ordinary error containment."
+  (let ((*chat-interaction-state* (chat-frame-interaction-state frame))
+        (failure nil))
+    (flet ((report-failure (condition)
+             (report-chat-frame-ui-error frame action condition :notify-p notify-p)))
+      (handler-case
+          (restart-case
+              (handler-bind
+                  ((error
+                     (lambda (condition)
+                       (setf failure condition)
+                       (when (chat-frame-debugger-available-p frame)
+                         (let ((*chat-graphical-debugger-active-p* t))
+                           (ignore-errors
+                             (file-debug-event "graphical-debugger-entered"
+                                               :action action
+                                               :condition-type (type-of condition)))
+                           (handler-case
+                               (clim-debugger:debugger condition nil)
+                             (error ()
+                               ;; Preserve the original condition if the
+                               ;; graphical debugger itself cannot display it.
+                               (ignore-errors
+                                 (file-debug-event "graphical-debugger-failed"
+                                                   :action action))
+                               nil)))))))
+                (funcall function))
+            (abort ()
+              :report "Return to RPLACA without retrying the failed action."
+              (when failure (report-failure failure))))
+        (error (condition) (report-failure condition))))))
+
+(defmethod clim:redisplay-frame-pane :around
+    ((frame rplaca-chat-frame) pane &key force-p)
+  "Keep CLIM's retry/skip restarts live for graphical pane error recovery."
+  (declare (ignore force-p))
+  (call-chat-frame-ui-action-safely
+   frame (format nil "display ~A" (if (symbolp pane) pane (clim:pane-name pane)))
+   (lambda () (call-next-method)) :notify-p nil))
 
 (defmethod clim:execute-frame-command :around
     ((frame rplaca-chat-frame) command)
@@ -2834,15 +2877,11 @@ implements that input contract before the next gesture is delivered."
   ;; The bundle is frame-local data only; it does not change panes or mappings.
   (refresh-chat-frame-appearance-port-bundle frame)
   (initialize-chat-frame-top-level-panes frame)
-  (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-    (setf (chat-frame-lifecycle-state frame) :running
-          (chat-frame-redisplay-pending-p frame) nil
-          (chat-frame-redisplay-handling-p frame) nil))
-  ;; Requests made during construction remain dirty. Drain them only after
-  ;; CLIM has enabled and grafted the frame, so a pre-adoption miss cannot be
-  ;; the last scheduling attempt.
-  (when (reserve-chat-frame-redisplay-event frame)
-    (enqueue-reserved-chat-frame-redisplay frame))
+  (bt:with-lock-held ((chat-frame-lifecycle-lock frame))
+    (setf (chat-frame-lifecycle-state frame) :running))
+  ;; Construction-time changes already live in the buffer. Queue their first
+  ;; application update only after CLIM has adopted the panes.
+  (request-chat-frame-redisplay frame)
   (focus-chat-frame-initial-input-pane frame)
   (file-debug-event "frame-ready"
                     :buffer-name (buffer-name (chat-frame-buffer frame))
@@ -3028,45 +3067,6 @@ this is the standard CLIM composition used by WITH-TEXT-STYLE."
     (terpri stream)
     (terpri stream)))
 
-(defun chat-tool-activity-summary-text (summary)
-  "Return the collapsed display text for SUMMARY."
-  (with-output-to-string (stream)
-    (format stream "tools> ~D tool message~:P collapsed"
-            (length (chat-tool-activity-summary-messages summary)))
-    (let ((counts (chat-tool-activity-summary-tool-counts summary)))
-      (if counts
-          (dolist (entry counts)
-            (format stream "~%  ~A × ~D" (car entry) (cdr entry)))
-          (format stream "~%  no tool calls recorded")))
-    (when (plusp (chat-tool-activity-summary-result-count summary))
-      (format stream "~%  ~D tool result~:P"
-              (chat-tool-activity-summary-result-count summary)))))
-
-(defun display-chat-tool-activity-summary (frame stream summary)
-  "Display SUMMARY as one collapsed tool-activity presentation."
-  (clim:with-output-as-presentation
-      (stream summary 'tool-activity-summary :single-box t)
-    (call-with-chat-appearance-role
-     frame stream '(:transcript-pane :transcript-tool)
-     (lambda ()
-       (write-string (chat-tool-activity-summary-text summary) stream))))
-  (terpri stream)
-  (terpri stream))
-
-(defun display-chat-display-item (frame stream item)
-  "Display one transcript ITEM."
-  (if (chat-tool-activity-summary-p item)
-      (display-chat-tool-activity-summary frame stream item)
-      (display-chat-message frame stream item)))
-
-(defun display-buffer-presentation-entry (frame stream entry)
-  "Display one generic buffer presentation ENTRY on STREAM."
-  (let ((text (getf entry :text ""))
-        (object (getf entry :object))
-        (presentation-type (getf entry :presentation-type)))
-    (flet ((emit ()
-             (let ((profile (getf entry :appearance-profile))
-                   (role-stack (getf entry :role-stack)))
 (defun attach-agent-lisp-button-tool (args)
   "Attach an agent-created Lisp button to the current chat transcript."
   (let ((buffer *current-tool-buffer*)
@@ -3129,6 +3129,45 @@ this is the standard CLIM composition used by WITH-TEXT-STYLE."
          (content :type "string"
                   :description "Text displayed in the new window.")))
 
+(defun chat-tool-activity-summary-text (summary)
+  "Return the collapsed display text for SUMMARY."
+  (with-output-to-string (stream)
+    (format stream "tools> ~D tool message~:P collapsed"
+            (length (chat-tool-activity-summary-messages summary)))
+    (let ((counts (chat-tool-activity-summary-tool-counts summary)))
+      (if counts
+          (dolist (entry counts)
+            (format stream "~%  ~A × ~D" (car entry) (cdr entry)))
+          (format stream "~%  no tool calls recorded")))
+    (when (plusp (chat-tool-activity-summary-result-count summary))
+      (format stream "~%  ~D tool result~:P"
+              (chat-tool-activity-summary-result-count summary)))))
+
+(defun display-chat-tool-activity-summary (frame stream summary)
+  "Display SUMMARY as one collapsed tool-activity presentation."
+  (clim:with-output-as-presentation
+      (stream summary 'tool-activity-summary :single-box t)
+    (call-with-chat-appearance-role
+     frame stream '(:transcript-pane :transcript-tool)
+     (lambda ()
+       (write-string (chat-tool-activity-summary-text summary) stream))))
+  (terpri stream)
+  (terpri stream))
+
+(defun display-chat-display-item (frame stream item)
+  "Display one transcript ITEM."
+  (if (chat-tool-activity-summary-p item)
+      (display-chat-tool-activity-summary frame stream item)
+      (display-chat-message frame stream item)))
+
+(defun display-buffer-presentation-entry (frame stream entry)
+  "Display one generic buffer presentation ENTRY on STREAM."
+  (let ((text (getf entry :text ""))
+        (object (getf entry :object))
+        (presentation-type (getf entry :presentation-type)))
+    (flet ((emit ()
+             (let ((profile (getf entry :appearance-profile))
+                   (role-stack (getf entry :role-stack)))
                (if (and profile role-stack)
                    (call-with-appearance-profile-role
                     frame stream profile role-stack
@@ -3951,76 +3990,15 @@ keys only; pane construction and low-level rendering objects are untouched."
          (ignore-errors (clim:sheet-grafted-p sheet))
          sheet)))
 
-(defun reserve-chat-frame-redisplay-event (frame)
-  "Reserve a single queued redisplay event for dirty running FRAME.
-Return true when the caller must enqueue the reserved event."
-  (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-    (when (and (eq (chat-frame-lifecycle-state frame) :running)
-               (chat-frame-redisplay-dirty-p frame)
-               (not (chat-frame-redisplay-pending-p frame))
-               (not (chat-frame-redisplay-handling-p frame)))
-      (setf (chat-frame-redisplay-pending-p frame) t)
-      (setf (chat-frame-redisplay-reserved-generation frame)
-            (chat-frame-redisplay-request-generation frame))
-      t)))
-
-(defparameter *chat-redisplay-enqueue-max-attempts* 2
-  "Maximum immediate attempts to enqueue one reserved redisplay wakeup.
-
-Retries do not sleep or recurse, so a broken/ungrafted event queue cannot spin
-forever or block the frame process.  Persistent failure releases the pending
-reservation while preserving dirty state for a later request or lifecycle
-start.")
-
-(defun enqueue-reserved-chat-frame-redisplay (frame)
-  "Enqueue FRAME's reserved redisplay event transactionally.
-If a transient queue failure clears before the bounded retry, deliver the
-already-dirty generation without requiring another notification.  Persistent
-failure releases the reservation while leaving the dirty bit set."
-  ;; Keep both same-generation recovery and concurrent-generation transfer in
-  ;; this bounded iterative loop.  No retry sleeps, recurses, or renders.
-  (loop
-    :with max-attempts := (max 1 *chat-redisplay-enqueue-max-attempts*)
-    :for attempt :from 1 :to max-attempts
-    :for reserved-generation :=
-      (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-        (chat-frame-redisplay-reserved-generation frame))
-    :when (queue-chat-frame-redisplay-event frame)
-      :return t
-    :do
-       (let ((retry-p nil))
-         (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-           (when (and (chat-frame-redisplay-pending-p frame)
-                      (= reserved-generation
-                         (chat-frame-redisplay-reserved-generation frame)))
-             (setf (chat-frame-redisplay-pending-p frame) nil)
-             ;; Retry the same dirty generation after a lone transient failure,
-             ;; or transfer a newer request that observed PENDING while this
-             ;; attempt was in flight.  The attempt cap is checked while the
-             ;; reservation is released so the last failure cannot leave a
-             ;; phantom PENDING event behind.
-             (when (and (eq (chat-frame-lifecycle-state frame) :running)
-                        (chat-frame-redisplay-dirty-p frame)
-                        (not (chat-frame-redisplay-handling-p frame))
-                        (< attempt max-attempts))
-               (setf (chat-frame-redisplay-pending-p frame) t
-                     (chat-frame-redisplay-reserved-generation frame)
-                     (chat-frame-redisplay-request-generation frame)
-                     retry-p t))))
-         (unless retry-p
-           (return nil)))))
-
 (defun request-chat-frame-redisplay (frame)
-  "Mark FRAME dirty and request one coalesced CLIM redisplay wakeup."
-  (file-debug-event "redisplay-requested"
-                    :buffer-name (buffer-name (chat-frame-buffer frame)))
-  (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-    (unless (member (chat-frame-lifecycle-state frame)
-                    '(:stopping :stopped))
-      (incf (chat-frame-redisplay-request-generation frame))
-      (setf (chat-frame-redisplay-dirty-p frame) t)))
-  (when (reserve-chat-frame-redisplay-event frame)
-    (enqueue-reserved-chat-frame-redisplay frame))
+  "Deliver an application update through McCLIM's native event queue.
+
+Each notification has its own wakeup. There is no application dirty/pending
+reservation which can consume the last update when a display fails. Startup
+queues an update after adoption; stopped frames accept no new work."
+  (when (bt:with-lock-held ((chat-frame-lifecycle-lock frame))
+          (eq (chat-frame-lifecycle-state frame) :running))
+    (queue-chat-frame-redisplay-event frame))
   frame)
 
 (defun chat-minibuffer-desired-row-count ()
@@ -4109,78 +4087,42 @@ contains the expanded pane and the pointer-documentation pane below it."
                                           :min-height height
                                           :max-height height))))))
 
+(defun apply-chat-frame-runtime-updates (frame)
+  "Apply worker-published results on FRAME's owning event process."
+  (let ((buf (chat-frame-buffer frame))
+        (*suppress-chat-redisplay-requests* t))
+    (when buf
+      (deliver-buffer-runtime-stopped-notification buf)
+      (update-openai-oauth-login buf)
+      (update-interactive-tool-execution buf)
+      (update-interactive-buffer-operation buf)
+      (when (buffer-pending-stream buf)
+        (update-streaming-response buf)))))
+
 (defun handle-chat-frame-redisplay (frame)
-  "Run the canonical redisplay step for FRAME's transcript pane."
-  (let ((redisplay-p nil))
-    (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-      (setf (chat-frame-redisplay-pending-p frame) nil)
-      (when (and (eq (chat-frame-lifecycle-state frame) :running)
-                 (chat-frame-redisplay-dirty-p frame))
-        (setf (chat-frame-redisplay-dirty-p frame) nil
-              (chat-frame-redisplay-handling-p frame) t
-              redisplay-p t)))
-    (when redisplay-p
-      (unwind-protect
-           (let ((buf (chat-frame-buffer frame)))
-             (when buf
-               (let ((*suppress-chat-redisplay-requests* t))
-                 ;; Teardown reapers queue only a private wake.  Deliver the
-                 ;; public completion hook here, after exact teardown released
-                 ;; STOPPING and on the owning CLIM frame process.  A queued
-                 ;; follow-up may now safely reserve a new provider operation.
-                 (deliver-buffer-runtime-stopped-notification buf)
-                 ;; OAuth workers publish only flow state and queue this normal
-                 ;; CLIM wakeup.  Application state is applied here, on the
-                 ;; frame process, after an exact-flow claim.
-                 (update-openai-oauth-login buf)
-                 (update-interactive-tool-execution buf)
-                 (update-interactive-buffer-operation buf)
-                 (when (buffer-pending-stream buf)
-                   (update-streaming-response buf))))
-             (update-chat-minibuffer-space-requirements frame)
-             (clim:redisplay-frame-pane frame 'transcript :force-p nil)
-             (ignore-errors
-               (clim:redisplay-frame-pane frame 'info :force-p t))
-             (ignore-errors
-               (clim:redisplay-frame-pane frame 'minibuffer :force-p t))
-             (chat-frame-follow-transcript-tail frame))
-        (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-          (setf (chat-frame-redisplay-handling-p frame) nil)))
-      ;; Reserve and enqueue immediately after releasing HANDLING.  In
-      ;; particular, do not leave PENDING claimed across diagnostics: if the
-      ;; redisplay body or a later log/snapshot signals, SAFE still has to be
-      ;; able to transfer a concurrent dirty request into a real queued event.
-      (let ((queued-again-p
-              (when (reserve-chat-frame-redisplay-event frame)
-                (enqueue-reserved-chat-frame-redisplay frame))))
-        (file-debug-event "redisplay-handled"
-                          :buffer-name (buffer-name (chat-frame-buffer frame))
-                          :repeat queued-again-p)
-        (emit-chat-frame-e2e-snapshot
-         frame :reason "redisplay-handled" :repeat queued-again-p)
-        queued-again-p)))
+  "Apply one queued update and let CLIM redisplay its application panes."
+  (when (eq (chat-frame-lifecycle-state frame) :running)
+    (apply-chat-frame-runtime-updates frame)
+    (update-chat-minibuffer-space-requirements frame)
+    ;; Use the pane protocol directly: ESA:REDISPLAY-FRAME-PANES defers while
+    ;; a key prefix is pending, but background messages must remain visible.
+    ;; CLIM owns incremental records, clearing, buffering, and repainting.
+    (clim:redisplay-frame-pane frame 'transcript :force-p nil)
+    (clim:redisplay-frame-pane frame 'info :force-p t)
+    (clim:redisplay-frame-pane frame 'minibuffer :force-p t)
+    (chat-frame-follow-transcript-tail frame)
+    (file-debug-event "redisplay-handled"
+                      :buffer-name (buffer-name (chat-frame-buffer frame))
+                      :repeat nil)
+    (emit-chat-frame-e2e-snapshot frame :reason "redisplay-handled" :repeat nil))
   frame)
 
 (defun handle-chat-frame-redisplay-safely (frame)
-  "Contain one asynchronous update failure at the application event boundary."
-  (handler-case
-      (handle-chat-frame-redisplay frame)
-    (error (condition)
-      ;; Transfer a request made by a worker during the failed body before any
-      ;; error reporting can itself fail.  HANDLE's cleanup released HANDLING
-      ;; without claiming PENDING, so this reservation remains transactional.
-      (when (reserve-chat-frame-redisplay-event frame)
-        (enqueue-reserved-chat-frame-redisplay frame))
-      (ignore-errors
-        (file-debug-event "redisplay-handler-error"
-                          :buffer-name
-                          (buffer-name (chat-frame-buffer frame))
-                          :condition (format nil "~A" condition)))
-      (ignore-errors
-        (let ((buffer (chat-frame-buffer frame)))
-          (when buffer
-            (setf (buffer-status buffer) :error))))
-      frame)))
+  "Contain an asynchronous application update at its frame event boundary."
+  (call-chat-frame-ui-action-safely
+   frame "background update" (lambda () (handle-chat-frame-redisplay frame))
+   :notify-p nil)
+  frame)
 
 (defmethod clim:handle-event
     ((sheet clime:top-level-sheet-mixin)
@@ -5240,11 +5182,8 @@ Every buffer cancellation has its own error boundary.  A broken provider or
 tool cleanup therefore cannot retain the dead frame through HOOK, prevent the
 remaining buffers from being cancelled, or leave the frame marked running."
   (handler-case
-      (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-        (setf (chat-frame-lifecycle-state frame) :stopping
-              (chat-frame-redisplay-dirty-p frame) nil
-              (chat-frame-redisplay-pending-p frame) nil
-              (chat-frame-redisplay-handling-p frame) nil))
+      (bt:with-lock-held ((chat-frame-lifecycle-lock frame))
+        (setf (chat-frame-lifecycle-state frame) :stopping))
     (error (condition)
       (report-chat-frame-cleanup-error frame :mark-stopping condition)))
   (unwind-protect
@@ -5281,7 +5220,7 @@ remaining buffers from being cancelled, or leave the frame marked running."
         (error (condition)
           (report-chat-frame-cleanup-error frame :remove-hook condition))))
     (handler-case
-        (bt:with-lock-held ((chat-frame-redisplay-lock frame))
+        (bt:with-lock-held ((chat-frame-lifecycle-lock frame))
           (setf (chat-frame-lifecycle-state frame) :stopped))
       (error (condition)
         (report-chat-frame-cleanup-error frame :mark-stopped condition)))
@@ -5301,10 +5240,8 @@ remaining buffers from being cancelled, or leave the frame marked running."
     ;; partially installed display hook.
     (unwind-protect
          (progn
-           (bt:with-lock-held ((chat-frame-redisplay-lock frame))
-             (setf (chat-frame-lifecycle-state frame) :starting
-                   (chat-frame-redisplay-pending-p frame) nil
-                   (chat-frame-redisplay-handling-p frame) nil))
+           (bt:with-lock-held ((chat-frame-lifecycle-lock frame))
+             (setf (chat-frame-lifecycle-state frame) :starting))
            (register-package-appearance-live-chat-frame frame)
            (setf hook
                  (lambda (buf reason)

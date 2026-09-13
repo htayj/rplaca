@@ -1688,129 +1688,39 @@ these tests exercise construction-time space requirements only."
     (is (string= "pointer target draft" (clim:gadget-value compose)))
     (is (= 5 (rplaca::chat-compose-pane-point-offset compose)))))
 
-(test chat-frame-redisplay-request-before-graft-does-not-wedge
-  "A failed pre-graft wakeup leaves dirty state retryable, not pending forever."
-  (let* ((buf (make-buffer "redisplay-before-graft"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame
-                                             :buffer buf)))
-    (setf (rplaca::chat-frame-lifecycle-state frame) :running)
-    (rplaca::request-chat-frame-redisplay frame)
-    (is-true (rplaca::chat-frame-redisplay-dirty-p frame))
-    (is-false (rplaca::chat-frame-redisplay-pending-p frame))
-    (is-false (rplaca::chat-frame-redisplay-handling-p frame))))
-
-(test concurrent-chat-redisplay-requests-reserve-one-wakeup
-  "Many worker notifications coalesce without losing the dirty state."
-  (let* ((buf (make-buffer "redisplay-coalescing"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame
-                                             :buffer buf))
-         (count-lock (bt:make-lock "redisplay-queue-count"))
-         (queue-count 0)
-         (wrong-frame-p nil)
-         (workers nil))
-    (setf (rplaca::chat-frame-lifecycle-state frame) :running)
+(test chat-frame-updates-respect-lifecycle
+  "Workers only queue work while the frame is running."
+  (let* ((buf (make-buffer "update-lifecycle" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (calls 0))
     (with-mcclim-test-function-override
         (rplaca::queue-chat-frame-redisplay-event (requested-frame)
-          (bt:with-lock-held (count-lock)
-            (unless (eq frame requested-frame)
-              (setf wrong-frame-p t))
-            (incf queue-count))
-          t)
-      (setf workers
-            (loop :repeat 64
-                  :collect
-                  (bt:make-thread
-                   (lambda ()
-                     (rplaca::request-chat-frame-redisplay frame)))))
-      (dolist (worker workers)
-        (bt:join-thread worker))
-      (is-false wrong-frame-p)
-      (is (= 1 queue-count))
-      (is-true (rplaca::chat-frame-redisplay-dirty-p frame))
-      (is-true (rplaca::chat-frame-redisplay-pending-p frame)))))
-
-(test lone-chat-redisplay-enqueue-failure-recovers-without-new-request
-  "One transient enqueue failure is retried without another worker notification."
-  (let* ((buf (make-buffer "redisplay-retry"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame
-                                             :buffer buf))
-         (attempts 0)
-         (rplaca::*chat-redisplay-enqueue-max-attempts* 2))
-    (setf (rplaca::chat-frame-lifecycle-state frame) :running)
-    (with-mcclim-test-function-override
-        (rplaca::queue-chat-frame-redisplay-event (requested-frame)
-          (declare (ignore requested-frame))
-          (incf attempts)
-          (> attempts 1))
+          (is (eq frame requested-frame))
+          (incf calls))
+      (dolist (state '(:created :starting :stopping :stopped))
+        (setf (rplaca::chat-frame-lifecycle-state frame) state)
+        (rplaca::request-chat-frame-redisplay frame))
+      (is (zerop calls))
+      (setf (rplaca::chat-frame-lifecycle-state frame) :running)
       (rplaca::request-chat-frame-redisplay frame)
-      (is (= 2 attempts))
-      (is-true (rplaca::chat-frame-redisplay-dirty-p frame))
-      (is-true (rplaca::chat-frame-redisplay-pending-p frame)))))
+      (is (= 1 calls)))))
 
-(test request-during-failed-redisplay-enqueue-is-not-lost
-  "A requester that observes an in-flight reservation is transferred on failure."
-  (let* ((buf (make-buffer "redisplay-failure-race"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame
-                                             :buffer buf))
-         (first-enqueue-entered
-           (bt:make-semaphore :name "redisplay-first-enqueue-entered"))
-         (release-first-enqueue
-           (bt:make-semaphore :name "redisplay-release-first-enqueue"))
-         (count-lock (bt:make-lock "redisplay-race-count"))
-         (attempts 0))
+(test concurrent-chat-updates-all-reach-the-native-queue
+  "An in-flight notification cannot consume a later worker's wakeup."
+  (let* ((buf (make-buffer "update-concurrency" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (lock (bt:make-lock "update-count"))
+         (calls 0))
     (setf (rplaca::chat-frame-lifecycle-state frame) :running)
     (with-mcclim-test-function-override
         (rplaca::queue-chat-frame-redisplay-event (requested-frame)
           (declare (ignore requested-frame))
-          (let ((attempt
-                  (bt:with-lock-held (count-lock)
-                    (incf attempts))))
-            (if (= attempt 1)
-                (progn
-                  (bt:signal-semaphore first-enqueue-entered)
-                  (bt:wait-on-semaphore release-first-enqueue :timeout 2)
-                  nil)
-                t)))
-      (let ((first-request
-              (bt:make-thread
-               (lambda ()
-                 (rplaca::request-chat-frame-redisplay frame))
-               :name "redisplay-failing-request")))
-        (is-true
-         (bt:wait-on-semaphore first-enqueue-entered :timeout 2))
-        ;; This request sees PENDING and returns without enqueuing itself.
-        (rplaca::request-chat-frame-redisplay frame)
-        (bt:signal-semaphore release-first-enqueue)
-        (bt:join-thread first-request))
-      (is (= 2 attempts))
-      (is-true (rplaca::chat-frame-redisplay-dirty-p frame))
-      (is-true (rplaca::chat-frame-redisplay-pending-p frame)))))
-
-(test redisplay-enqueue-retry-is-bounded-and-iterative
-  "A failing queue cannot spin despite newer requests during every attempt."
-  (let* ((buf (make-buffer "redisplay-iterative-retry"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame
-                 'rplaca::rplaca-chat-frame
-                 :buffer buf))
-         (attempts 0)
-         (rplaca::*chat-redisplay-enqueue-max-attempts* 3))
-    (setf (rplaca::chat-frame-lifecycle-state frame) :running)
-    (with-mcclim-test-function-override
-        (rplaca::queue-chat-frame-redisplay-event (requested-frame)
-          (incf attempts)
-          ;; Each newer request observes PENDING.  The owning iterative retry
-          ;; must stop at the cap and release that reservation on final failure.
-          (rplaca::request-chat-frame-redisplay requested-frame)
-          nil)
-      (rplaca::request-chat-frame-redisplay frame))
-    (is (= rplaca::*chat-redisplay-enqueue-max-attempts* attempts))
-    (is-true (rplaca::chat-frame-redisplay-dirty-p frame))
-    (is-false (rplaca::chat-frame-redisplay-pending-p frame))))
+          (bt:with-lock-held (lock) (incf calls)))
+      (let ((workers (loop :repeat 32 :collect
+                          (bt:make-thread
+                           (lambda () (rplaca::request-chat-frame-redisplay frame))))))
+        (dolist (worker workers) (bt:join-thread worker)))
+      (is (= 32 calls)))))
 
 (test identical-chat-frame-command-table-assignment-does-not-rebuild-menu-gadgets
   "ESA's per-turn EQ assignment cannot recreate an otherwise unchanged menu."
@@ -1921,9 +1831,6 @@ these tests exercise construction-time space requirements only."
       (setf (rplaca::buffer-runtime-stopped-notification-p buf) t
             (rplaca::buffer-runtime-stopping-p buf) nil
             (rplaca::buffer-runtime-teardown buf) nil))
-    (bt:with-lock-held ((rplaca::chat-frame-redisplay-lock frame))
-      (setf (rplaca::chat-frame-redisplay-dirty-p frame) t
-            (rplaca::chat-frame-redisplay-pending-p frame) t))
     (with-mcclim-test-function-override
         (clim:redisplay-frame-pane (requested-frame pane &key force-p)
           (declare (ignore requested-frame pane force-p))
@@ -1969,9 +1876,6 @@ these tests exercise construction-time space requirements only."
     (is (eq :oauth (buffer-status buf)))
     (is (eq flow (rplaca::openai-oauth-pending-flow)))
     (is (null public-events))
-    (bt:with-lock-held ((rplaca::chat-frame-redisplay-lock frame))
-      (setf (rplaca::chat-frame-redisplay-dirty-p frame) t
-            (rplaca::chat-frame-redisplay-pending-p frame) t))
     (with-mcclim-test-function-override
         (clim:redisplay-frame-pane (requested-frame pane &key force-p)
           (declare (ignore requested-frame pane force-p))
@@ -1991,83 +1895,130 @@ these tests exercise construction-time space requirements only."
                        (not (eq message (buffer-input-message buf))))
            :thereis (search "Login successful" (message-text message))))))
 
-(test asynchronous-redisplay-error-is-contained-and-later-request-recovers
-  "A failing redisplay phase does not unwind the frame top level or wedge latches."
-  (let* ((buf (make-buffer "redisplay-error-boundary"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame
-                                             :buffer buf))
+(test graphical-debugger-is-limited-to-the-owning-frame-process
+  "An inherited or explicit frame binding cannot open a worker-side debugger."
+  (let* ((buf (make-buffer "debugger-owner" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (clim:*application-frame* frame)
+         (worker-available nil))
+    (setf (rplaca::chat-frame-lifecycle-state frame) :running
+          (climi::frame-process frame) (clim-sys:current-process))
+    (with-mcclim-test-function-override
+        (rplaca::chat-frame-grafted-top-level-sheet (f) (declare (ignore f)) t)
+      (is-true (rplaca::chat-frame-debugger-available-p frame))
+      (let ((rplaca::*chat-graphical-debugger-active-p* t))
+        (is-false (rplaca::chat-frame-debugger-available-p frame)))
+      (let ((rplaca:*chat-graphical-debugger-enabled-p* nil))
+        (is-false (rplaca::chat-frame-debugger-available-p frame)))
+      (bt:join-thread
+       (bt:make-thread
+        (lambda ()
+          (let ((clim:*application-frame* frame))
+            (setf worker-available
+                  (rplaca::chat-frame-debugger-available-p frame))))))
+      (is-false worker-available))))
+
+(test graphical-error-handler-preserves-live-restarts
+  "The recovery choice runs before the failed computation unwinds."
+  (let* ((buf (make-buffer "live-restart" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (unwound nil)
+         (debugger-calls 0))
+    (with-mcclim-test-function-override
+        (rplaca::chat-frame-debugger-available-p (f) (declare (ignore f)) t)
+      (with-mcclim-test-function-override
+          (clim-debugger:debugger (condition hook)
+            (declare (ignore hook))
+            (incf debugger-calls)
+            (is-false unwound)
+            (is (typep condition 'simple-error))
+            (invoke-restart 'use-value 42))
+        (is (= 42
+               (rplaca::call-chat-frame-ui-action-safely
+                frame "test live restart"
+                (lambda ()
+                  (unwind-protect
+                       (restart-case (error "recoverable")
+                         (use-value (value) value))
+                    (setf unwound t))))))))
+    (is (= 1 debugger-calls))
+    (is-true unwound)))
+
+(test graphical-error-abort-preserves-frame-and-draft
+  "Closing the debugger aborts one action and never repeats its side effects."
+  (let* ((buf (make-buffer "debugger-abort" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (effects 0))
+    (set-message-text (buffer-input-message buf) "unsent draft")
+    (setf (rplaca::chat-frame-lifecycle-state frame) :running)
+    (with-mcclim-test-function-override
+        (rplaca::chat-frame-debugger-available-p (f) (declare (ignore f)) t)
+      (with-mcclim-test-function-override
+          (clim-debugger:debugger (condition hook)
+            (declare (ignore condition hook))
+            (abort))
+        (is-false
+         (rplaca::call-chat-frame-ui-action-safely
+          frame "abort probe" (lambda () (incf effects) (error "stop"))))))
+    (is (= 1 effects))
+    (is (eq :running (rplaca::chat-frame-lifecycle-state frame)))
+    (is (string= "unsent draft" (message-text (buffer-input-message buf))))))
+
+(test debugger-failure-falls-back-without-recursion
+  "A broken graphical debugger contains the original error once."
+  (let* ((buf (make-buffer "debugger-fallback" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (calls 0)
+         (wakes 0)
+         (rplaca::*buffer-display-wakeup-hook*
+           (list (lambda (&rest args) (declare (ignore args)) (incf wakes)))))
+    (with-mcclim-test-function-override
+        (rplaca::chat-frame-debugger-available-p (f) (declare (ignore f)) t)
+      (with-mcclim-test-function-override
+          (clim-debugger:debugger (condition hook)
+            (declare (ignore condition hook))
+            (incf calls)
+            (error "debugger broken"))
+        (is-false
+         (rplaca::call-chat-frame-ui-action-safely
+          frame "display probe" (lambda () (error "original failure"))
+          :notify-p nil))))
+    (is (= 1 calls))
+    (is (zerop wakes))
+    (is (eq :error (buffer-status buf)))
+    (is-true (search "original failure"
+                     (message-text (message-prev (buffer-input-message buf)))))))
+
+(test update-during-failed-handler-still-has-its-own-wakeup
+  "A failure cannot swallow a concurrent notification."
+  (let* ((buf (make-buffer "update-after-error" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
          (calls 0))
     (setf (rplaca::chat-frame-lifecycle-state frame) :running)
     (with-mcclim-test-function-override
-        (clim:redisplay-frame-pane (requested-frame pane &key force-p)
-          (declare (ignore requested-frame pane force-p))
-          (incf calls)
-          (when (= calls 1)
-            (error "injected redisplay failure"))
-          :redisplayed)
-      (bt:with-lock-held ((rplaca::chat-frame-redisplay-lock frame))
-        (setf (rplaca::chat-frame-redisplay-dirty-p frame) t
-              (rplaca::chat-frame-redisplay-pending-p frame) t))
-      (is (eq frame
-              (rplaca::handle-chat-frame-redisplay-safely frame)))
-      (is (eq :running (rplaca::chat-frame-lifecycle-state frame)))
-      (is-false (rplaca::chat-frame-redisplay-handling-p frame))
-      (is-false (rplaca::chat-frame-redisplay-pending-p frame))
-      (bt:with-lock-held ((rplaca::chat-frame-redisplay-lock frame))
-        (setf (rplaca::chat-frame-redisplay-dirty-p frame) t
-              (rplaca::chat-frame-redisplay-pending-p frame) t))
-      (is (eq frame
-              (rplaca::handle-chat-frame-redisplay-safely frame)))
-      (is (> calls 1))
-      (is (eq :running (rplaca::chat-frame-lifecycle-state frame)))
-      (is-false (rplaca::chat-frame-redisplay-handling-p frame)))))
-
-(test redisplay-request-arriving-during-failed-handler-is-not-stranded
-  "The error boundary queues dirty work after HANDLING is released."
-  (let* ((buf (make-buffer "redisplay-error-concurrent-request"
-                           :session-persistence-mode :ephemeral))
-         (frame (clim:make-application-frame
-                 'rplaca::rplaca-chat-frame
-                 :buffer buf))
-         (redisplay-calls 0)
-         (queue-calls 0))
-    (setf (rplaca::chat-frame-lifecycle-state frame) :running)
-    (with-mcclim-test-function-override
-        (rplaca::queue-chat-frame-redisplay-event (requested-frame)
-          (declare (ignore requested-frame))
-          (incf queue-calls)
-          t)
+        (rplaca::queue-chat-frame-redisplay-event (f)
+          (declare (ignore f)) (incf calls))
       (with-mcclim-test-function-override
-          (clim:redisplay-frame-pane (requested-frame pane &key force-p)
-            (declare (ignore force-p))
-            ;; Count the transcript phase, not the independently redisplayed
-            ;; info/minibuffer panes in the successful retry.
-            (when (eq pane 'rplaca::transcript)
-              (incf redisplay-calls)
-              (when (= redisplay-calls 1)
-                ;; A worker-equivalent request lands while HANDLING is true,
-                ;; then the current display phase fails before its epilogue.
-                (rplaca::request-chat-frame-redisplay requested-frame)
-                (error "injected redisplay failure after concurrent request")))
-            :redisplayed)
-        (bt:with-lock-held ((rplaca::chat-frame-redisplay-lock frame))
-          (setf (rplaca::chat-frame-redisplay-dirty-p frame) t
-                (rplaca::chat-frame-redisplay-pending-p frame) t))
-        (is (eq frame
-                (rplaca::handle-chat-frame-redisplay-safely frame)))
-        (is (= 1 queue-calls))
-        (is-true (rplaca::chat-frame-redisplay-dirty-p frame))
-        (is-true (rplaca::chat-frame-redisplay-pending-p frame))
-        (is-false (rplaca::chat-frame-redisplay-handling-p frame))
-        ;; Consume the queued retry.  It succeeds and leaves every latch clear.
-        (is (eq frame
-                (rplaca::handle-chat-frame-redisplay-safely frame)))
-        (is (= 2 redisplay-calls))
-        (is (= 1 queue-calls))
-        (is-false (rplaca::chat-frame-redisplay-dirty-p frame))
-        (is-false (rplaca::chat-frame-redisplay-pending-p frame))
-        (is-false (rplaca::chat-frame-redisplay-handling-p frame))))))
+          (rplaca::apply-chat-frame-runtime-updates (f)
+            (rplaca::request-chat-frame-redisplay f)
+            (error "injected update failure"))
+        (rplaca::handle-chat-frame-redisplay-safely frame)))
+    (is (= 1 calls))
+    (is (eq :running (rplaca::chat-frame-lifecycle-state frame)))))
+
+(test ui-error-reporting-handles-circular-condition-data
+  "Printing an error containing circular Lisp data cannot exhaust the heap."
+  (let* ((buf (make-buffer "circular-error" :session-persistence-mode :ephemeral))
+         (frame (clim:make-application-frame 'rplaca::rplaca-chat-frame :buffer buf))
+         (cycle (list :cycle))
+         (*print-circle* nil))
+    (setf (cdr cycle) cycle)
+    (rplaca::call-chat-frame-ui-action-safely
+     frame "circular diagnostic" (lambda () (error "Bad data: ~S" cycle))
+     :notify-p nil)
+    (let ((text (message-text (message-prev (buffer-input-message buf)))))
+      (is-true (search "CYCLE" text))
+      (is (< (length text) 400)))))
 
 (test chat-frame-cleanup-continues-after-one-buffer-cancellation-fails
   "Frame teardown retires its hook and visits every buffer despite one error."

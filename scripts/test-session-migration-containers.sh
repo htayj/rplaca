@@ -19,15 +19,8 @@ TWO_LOG="$HOST_ROOT/two.log"
 one_pid=''
 two_pid=''
 
-if [ -z "${RPLACA_SSL_LIB:-}" ]; then
-  ssl_file=$(find /gnu/store -path '*/lib/libssl.so' -print -quit)
-  if [ -z "$ssl_file" ]; then
-    printf 'could not locate a Guix OpenSSL library for launcher test\n' >&2
-    exit 1
-  fi
-  RPLACA_SSL_LIB=${ssl_file%/*}
-  export RPLACA_SSL_LIB
-fi
+# Let the launcher resolve OpenSSL from its actual container environment.
+# An arbitrary host store item need not belong to that container's closure.
 
 cleanup() {
   status=$?
@@ -47,6 +40,12 @@ wait_for_file() {
   path="$1"
   count=0
   while [ ! -f "$path" ]; do
+    for worker_pid in "$one_pid" "$two_pid"; do
+      if [ -n "$worker_pid" ] && ! kill -0 "$worker_pid" 2>/dev/null; then
+        printf 'publisher %s exited before %s\n' "$worker_pid" "$path" >&2
+        return 1
+      fi
+    done
     count=$((count + 1))
     if [ "$count" -ge 2400 ]; then
       printf 'timed out waiting for %s\n' "$path" >&2
@@ -102,8 +101,18 @@ one_pid=''
 wait "$two_pid"
 two_pid=''
 
-grep -qx 'pid=1' "$HOST_BARRIER/started-one"
-grep -qx 'pid=1' "$HOST_BARRIER/started-two"
+# Guix may reserve PID 1 for its container init. The migration invariant is
+# that independent publishers can have the same guest PID, not that it is 1.
+guest_pid_one=$(sed -n 's/^pid=//p' "$HOST_BARRIER/started-one")
+guest_pid_two=$(sed -n 's/^pid=//p' "$HOST_BARRIER/started-two")
+case "$guest_pid_one:$guest_pid_two" in
+  *[!0-9:]*|:*|*:) printf 'invalid publisher PIDs\n' >&2; exit 1 ;;
+esac
+if [ "$guest_pid_one" -le 0 ] || [ "$guest_pid_one" != "$guest_pid_two" ]; then
+  printf 'expected identical positive guest PIDs, got %s and %s\n' \
+    "$guest_pid_one" "$guest_pid_two" >&2
+  exit 1
+fi
 if cmp -s "$HOST_BARRIER/started-one" "$HOST_BARRIER/started-two"; then
   printf 'independent containers unexpectedly reported identical proc state\n' >&2
   exit 1
@@ -122,4 +131,5 @@ if find "$HOST_ROOT/rplaca" -maxdepth 1 -type d \
   exit 1
 fi
 
-printf 'session-migration-containers: two independent publishers passed\n'
+printf 'session-migration-containers: two independent publishers passed (guest PID %s)\n' \
+  "$guest_pid_one"

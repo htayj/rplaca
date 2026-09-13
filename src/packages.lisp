@@ -53,6 +53,8 @@
    #:execute-lisp-eval
    #:eval-history-to-string)
   (:export
+   #:*chat-graphical-debugger-enabled-p*
+
    ;; General utilities
    #:count-occurrences
 

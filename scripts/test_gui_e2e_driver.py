@@ -193,6 +193,24 @@ class EventLogReaderTests(unittest.TestCase):
         self.assertEqual(101, len(self.session._events()))
 
 
+class StabilitySignatureTests(unittest.TestCase):
+    def test_contained_ui_errors_and_graphical_debuggers_fail_stability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "debug.log"
+            session = DRIVER.McCLIMGuiSession(
+                window_id="1", window_title="test", debug_log=log,
+                artifact_dir=root)
+            for signature in ("ui-action-error", "graphical-debugger-entered",
+                              "graphical-debugger-failed"):
+                with self.subTest(signature=signature):
+                    log.write_text(signature)
+                    with self.assertRaises(DRIVER.DriverError):
+                        DRIVER.assert_no_stability_failure_signatures(session)
+            log.write_text("normal update")
+            DRIVER.assert_no_stability_failure_signatures(session)
+
+
 class ExternalCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
