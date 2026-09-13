@@ -2079,6 +2079,7 @@ respected."
 (defparameter *provider-known-models*
   '((:openai-codex
      "gpt-5.6-sol"
+     "gpt-6-astra"
      "gpt-5.6-terra"
      "gpt-5.6-luna"
      "gpt-5.5"
@@ -2135,7 +2136,11 @@ an API key is configured; this static list is used as a fallback.
 These are used by the model selector overlay.")
 
 (defparameter *openai-codex-model-think-levels*
-  '(("gpt-5.6-sol" "none" "low" "medium" "high" "xhigh" "max")
+  ;; Use the Responses API effort values. Codex's additional "ultra" mode
+  ;; includes orchestration behavior, not a documented Responses effort.
+  ;; https://developers.openai.com/api/docs/models/gpt-6-astra
+  '(("gpt-6-astra" "low" "medium" "high" "xhigh" "max")
+    ("gpt-5.6-sol" "none" "low" "medium" "high" "xhigh" "max")
     ("gpt-5.6-terra" "none" "low" "medium" "high" "xhigh" "max")
     ("gpt-5.6-luna" "none" "low" "medium" "high" "xhigh" "max")
     ("gpt-5.5" "none" "low" "medium" "high" "xhigh")

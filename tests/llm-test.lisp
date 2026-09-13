@@ -6602,7 +6602,36 @@ same
     (is (member "gpt-5.1-codex-mini" models :test #'string=))
     (is (member "gpt-5.2" models :test #'string=))
     (is (member rplaca::*openai-codex-model* models :test #'string=))
-    (is (= 12 (length models)))))
+    (is (member "gpt-6-astra" models :test #'string=))
+    (is (= 13 (length models)))))
+
+(test astra-reasoning-and-responses-request
+  "Astra retains supported reasoning in Responses and drops an old none override."
+  (let ((buffer (make-buffer "astra-request-test"
+                             :session-persistence-mode :ephemeral)))
+    (is (equal '("low" "medium" "high" "xhigh" "max")
+               (rplaca::provider-model-supported-think-levels
+                :openai-codex "gpt-6-astra")))
+    (dolist (effort '("low" "medium" "high" "xhigh" "max"))
+      (setf (buffer-think-level-override buffer) effort)
+      (let* ((resolved (rplaca::resolved-buffer-think-level
+                        buffer :openai-codex "gpt-6-astra"))
+             (body (rplaca::api-json-decode
+                    (rplaca::openai-codex-responses-request-body
+                     nil "gpt-6-astra" 128 nil :stream t
+                     :reasoning-effort resolved :system-prompt "Test."))))
+        (is (equal effort resolved))
+        (is (equal "gpt-6-astra" (cdr (assoc :model body))))
+        (is (equal effort (cdr (assoc :effort (cdr (assoc :reasoning body))))))
+        (is (eq t (cdr (assoc :stream body))))
+        (dolist (parameter '(:temperature :top--p :top--logprobs))
+          (is (null (assoc parameter body))))))
+    (setf (buffer-think-level-override buffer) "none")
+    (multiple-value-bind (status effort)
+        (rplaca::reconcile-buffer-think-level-override
+         buffer :provider :openai-codex :model "gpt-6-astra")
+      (is (eq :reset status))
+      (is (null effort)))))
 
 (test normalize-provider-openai-codex-storage-forms
   "normalize-provider accepts both kebab-case and JSON camelCase storage forms."

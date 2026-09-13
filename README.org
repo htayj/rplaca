@@ -540,6 +540,11 @@ Customize RPLACA by creating =~/.rplaca.d/init.lisp=:
  :provider :openai-codex
  :model "gpt-5.6-sol"
  :think-level "high"
+The =openai-codex= model selector includes =gpt-6-astra=, using the existing
+Responses API transport with =low=, =medium=, =high=, =xhigh=, and =max=
+reasoning. Astra does not support =none= reasoning; see the
+[[https://developers.openai.com/api/docs/models/gpt-6-astra][official model documentation]].
+
  :core-prompt "Use lisp_eval only with mode=isolated for concrete work. Inspect first, then modify."
  :personality-prompt "You are a concise writing partner focused on structure and tone.")
 
