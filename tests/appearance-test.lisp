@@ -468,6 +468,33 @@
     (is (appearance-unspecified-p (appearance-surface-spec-background surface)))
     (is (eq :none (appearance-decoration-spec-kind decoration)))))
 
+(test appearance-unspecified-sentinel-survives-source-reload
+  "Reloading its source declaration preserves sentinels in existing objects."
+  (let* ((source (merge-pathnames
+                  #P"src/appearance.lisp"
+                  (asdf:system-source-directory "rplaca")))
+         (old-sentinel rplaca::*appearance-unspecified*)
+         (typography (make-appearance-typography-spec :face :bold))
+         (declaration
+           (with-open-file (stream source :direction :input)
+             (let ((*package* (find-package :rplaca)))
+               (loop :for form = (read stream nil nil)
+                     :while form
+                     :when (and (consp form)
+                                (member (first form) '(defvar defparameter))
+                                (eq (second form)
+                                    'rplaca::*appearance-unspecified*))
+                       :return form)))))
+    (is-true declaration)
+    (unwind-protect
+         (progn
+           (eval declaration)
+           (is (eq old-sentinel rplaca::*appearance-unspecified*))
+           (is-true
+            (appearance-unspecified-p
+             (appearance-typography-spec-family typography))))
+      (setf rplaca::*appearance-unspecified* old-sentinel))))
+
 (test appearance-role-axis-validation-respects-role-kind
   "Surface-only background declarations cannot silently apply to content roles."
   (let* ((content (make-appearance-role-definition

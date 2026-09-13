@@ -6,7 +6,8 @@
 ;;;; I/O.  It describes immutable appearance data which later UI code resolves at
 ;;;; a frame and port boundary.
 
-(defparameter *appearance-unspecified* (gensym "APPEARANCE-UNSPECIFIED-"))
+(defvar *appearance-unspecified* (gensym "APPEARANCE-UNSPECIFIED-")
+  "Process-stable sentinel retained across in-place ASDF reloads.")
 
 (defun appearance-unspecified-p (value)
   "Return true when VALUE is the internal inheritance sentinel."
