@@ -22,6 +22,8 @@ cat > "$TMP_BIN/sbcl" <<'EOF'
 #!/bin/sh
 {
   printf 'clean-build=<%s>\n' "${RPLACA_RUN_CLEAN_BUILD:-}"
+  printf 'repair-request-dir=<%s>\n' "${RPLACA_CRASH_REPAIR_REQUEST_DIR:-}"
+  printf 'repair-history=<%s>\n' "${RPLACA_CRASH_REPAIR_HISTORY:-}"
   index=0
   for argument in "$@"; do
     printf 'argument[%s]=<%s>\n' "$index" "$argument"
@@ -68,6 +70,8 @@ write_expected() {
   shift 2
   {
     printf 'clean-build=<%s>\n' "$clean_build"
+    printf 'repair-request-dir=<%s>\n' "$REPO_ROOT/.cache/crash-repair/requests"
+    printf 'repair-history=<%s>\n' "$REPO_ROOT/.cache/crash-repair/repair-history.md"
     printf '%s\n' \
       'argument[0]=<--dynamic-space-size>' \
       'argument[1]=<2048>' \

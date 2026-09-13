@@ -426,6 +426,19 @@ and GUI dependencies installed:
 
 #+begin_src sh
 ./run-native.sh
+=run.sh= and =run-native.sh= also supervise fatal crashes. After RPLACA
+publishes a private crash report and repair request, the launcher starts a fresh
+non-interactive Codex session inside the dedicated Guix repair container, gives
+it the report, debug log, and append-only repair history, and asks it to fix and
+validate the bug. RPLACA is relaunched only when Codex returns a
+schema-validated =fixed= result. Two repair attempts are allowed per launch
+chain by default; repeated failure stops the loop and leaves all evidence under
+=.cache/crash-repair/=. Set
+=RPLACA_CRASH_REPAIR=0= to disable repair, or
+=RPLACA_CRASH_REPAIR_MAX_ATTEMPTS=1..10= to change the cap. Codex progress,
+JSONL events, and errors are echoed into the terminal that launched RPLACA as
+well as retained in the per-attempt logs.
+
 #+end_src
 
 Native runs need SBCL, a Quicklisp-compatible setup file, OpenSSL, X11 client

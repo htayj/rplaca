@@ -52,6 +52,10 @@ printf 'font\n' > "$TMP_FONT_FILE"
 TMP_FONT_UNREADABLE="$TMP_FONT_DIR/unreadable.ttf"
 cp "$TMP_FONT_FILE" "$TMP_FONT_UNREADABLE"
 chmod 000 "$TMP_FONT_UNREADABLE"
+TMP_CODEX_BUNDLE="$TMP_DIR/codex-bundle/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl"
+mkdir -p "$TMP_CODEX_BUNDLE/bin"
+printf '#!/bin/sh\nexit 0\n' > "$TMP_CODEX_BUNDLE/bin/codex"
+chmod +x "$TMP_CODEX_BUNDLE/bin/codex"
 REAL_SHA256SUM=$(command -v sha256sum)
 REAL_MKDIR=$(command -v mkdir)
 EXPECTED_SHA=$(printf 'quicklisp\n' | "$REAL_SHA256SUM" | cut -d' ' -f1)
@@ -686,12 +690,14 @@ env PATH="$TMP_BIN:$PATH" \
   RPLACA_SSL_LIB="$TMP_SSL_LIB" \
   RPLACA_APPEARANCE_THEME=dark \
   RPLACA_CRASH_REPORT_DIR=/tmp/rplaca-crash-test \
+  RPLACA_CRASH_REPAIR_REQUEST_DIR=/workspace/.cache/crash-repair/requests \
+  RPLACA_CRASH_REPAIR_HISTORY=/workspace/.cache/crash-repair/repair-history.md \
   RPLACA_E2E_PROVIDER=echo \
   RPLACA_E2E_EVENTS=/tmp/rplaca-e2e-events \
   RPLACA_GUI_E2E_INITIAL_INPUT_FOCUS=1 \
   XDG_STATE_HOME=/tmp/rplaca-state-test \
   CL_SOURCE_REGISTRY=/hostile/host/registry/ \
-  "$LAUNCHER" --mode run -- sh -c 'case "$HOME" in /workspace/.cache/launcher-test-*/home) ;; *) exit 1 ;; esac; test "$RPLACA_QUICKLISP_SETUP" = "$HOME/quicklisp/setup.lisp" && test "$XDG_CACHE_HOME" = "${HOME%/home}" && test "$RPLACA_PROMPT_PROJECT_ROOT" = "/workspace" && test "$CL_SOURCE_REGISTRY" = "$GUIX_ENVIRONMENT/share/common-lisp/systems/" && test "$RPLACA_APPEARANCE_THEME" = dark && test "$RPLACA_CRASH_REPORT_DIR" = /tmp/rplaca-crash-test && test "$RPLACA_E2E_PROVIDER" = echo && test "$RPLACA_E2E_EVENTS" = /tmp/rplaca-e2e-events && test "$RPLACA_GUI_E2E_INITIAL_INPUT_FOCUS" = 1 && test "$XDG_STATE_HOME" = /tmp/rplaca-state-test && test -f "${RPLACA_QUICKLISP_SETUP#/workspace/}"' 2>"$TMP_DIR/runtime-env.stderr"
+  "$LAUNCHER" --mode run -- sh -c 'case "$HOME" in /workspace/.cache/launcher-test-*/home) ;; *) exit 1 ;; esac; test "$RPLACA_QUICKLISP_SETUP" = "$HOME/quicklisp/setup.lisp" && test "$XDG_CACHE_HOME" = "${HOME%/home}" && test "$RPLACA_PROMPT_PROJECT_ROOT" = "/workspace" && test "$CL_SOURCE_REGISTRY" = "$GUIX_ENVIRONMENT/share/common-lisp/systems/" && test "$RPLACA_APPEARANCE_THEME" = dark && test "$RPLACA_CRASH_REPORT_DIR" = /tmp/rplaca-crash-test && test "$RPLACA_CRASH_REPAIR_REQUEST_DIR" = /workspace/.cache/crash-repair/requests && test "$RPLACA_CRASH_REPAIR_HISTORY" = /workspace/.cache/crash-repair/repair-history.md && test "$RPLACA_E2E_PROVIDER" = echo && test "$RPLACA_E2E_EVENTS" = /tmp/rplaca-e2e-events && test "$RPLACA_GUI_E2E_INITIAL_INPUT_FOCUS" = 1 && test "$XDG_STATE_HOME" = /tmp/rplaca-state-test && test -f "${RPLACA_QUICKLISP_SETUP#/workspace/}"' 2>"$TMP_DIR/runtime-env.stderr"
 actual_code=$?
 set -e
 if [ "$actual_code" -ne 0 ]; then
@@ -808,6 +814,8 @@ if [ "$actual_code" -ne 0 ]; then
   exit 1
 fi
 for variable in \
+  RPLACA_CRASH_REPAIR_REQUEST_DIR \
+  RPLACA_CRASH_REPAIR_HISTORY \
   RPLACA_GUI_E2E_FRAME_READY_TIMEOUT_SECONDS \
   RPLACA_GUI_E2E_APP_EXIT_TIMEOUT_SECONDS \
   RPLACA_GUI_E2E_STABILITY_MENU_ITERATIONS \
@@ -819,6 +827,40 @@ for variable in \
     exit 1
   fi
 done
+
+rm -f "$guix_args_log"
+set +e
+env PATH="$TMP_BIN:$PATH" \
+  RPLACA_ENABLE_TEST_TOGGLES=1 \
+  RPLACA_SSL_LIB="$TMP_SSL_LIB" \
+  RPLACA_GUIX_ARGS_LOG="$guix_args_log" \
+  RPLACA_CODEX_BUNDLE="$TMP_CODEX_BUNDLE" \
+  "$LAUNCHER" --mode run -- /run/rplaca-codex/bin/codex \
+  2>"$TMP_DIR/codex-bundle.stderr"
+actual_code=$?
+set -e
+if [ "$actual_code" -ne 0 ] ||
+   ! grep -F -- "--expose=$TMP_CODEX_BUNDLE=/run/rplaca-codex" "$guix_args_log" >/dev/null; then
+  echo "FAIL codex-bundle-expose: expected read-only Codex bundle mapping" >&2
+  cat "$TMP_DIR/codex-bundle.stderr" >&2
+  cat "$guix_args_log" >&2
+  exit 1
+fi
+
+set +e
+env PATH="$TMP_BIN:$PATH" \
+  RPLACA_ENABLE_TEST_TOGGLES=1 \
+  RPLACA_SSL_LIB="$TMP_SSL_LIB" \
+  RPLACA_CODEX_BUNDLE="$TMP_DIR/missing-codex-bundle" \
+  "$LAUNCHER" --mode run -- true \
+  2>"$TMP_DIR/codex-bundle-missing.stderr"
+actual_code=$?
+set -e
+if [ "$actual_code" -ne 125 ]; then
+  echo "FAIL codex-bundle-missing: expected exit 125 got $actual_code" >&2
+  cat "$TMP_DIR/codex-bundle-missing.stderr" >&2
+  exit 1
+fi
 
 legacy_home="$TMP_DIR/legacy-home"
 mkdir -p \

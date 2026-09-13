@@ -1,5 +1,10 @@
 # Fatal crash reports
 
+Recoverable errors in a running chat frame use
+[graphical error recovery](ERROR-RECOVERY.md). Its live restarts run before
+the stack unwinds. The fatal reporting path below remains the fallback for
+unhandled failures outside those UI boundaries.
+
 RPLACA writes one private diagnostic report when an unhandled condition
 reaches SBCL's debugger while `rplaca-main` owns the application runtime.
 This includes a fatal condition on the main/frame thread and an unhandled fatal
@@ -81,3 +86,30 @@ If report creation fails, RPLACA prints a short reporter-failure notice and
 continues into the original SBCL fatal hook. Reporter recursion is suppressed,
 and a process-wide atomic claim prevents concurrent fatal threads from
 publishing more than one report for the same application runtime.
+
+## Automatic Codex repair
+
+Interactive `./run.sh` and `./run-native.sh` launches are supervised. A fatal
+crash publishes the normal bounded report plus a private `*.request` handoff
+containing the exact bounded, credential-redacted condition message and paths
+to the report, debug log, and repair history. Launcher or container failures
+that do not publish a fresh request never invoke Codex.
+
+The outer supervisor starts a fresh `codex exec` session inside a dedicated Guix
+repair container with the repository mounted at `/workspace`. The fixer must
+read `AGENTS.md`, the crash artifacts, and
+`.cache/crash-repair/repair-history.md`; preserve unrelated work; implement and
+test the smallest repair; and return a schema-validated `fixed` or `blocked`
+result. It does not commit or push.
+
+Per-attempt JSONL events, stderr, and the final structured result are retained
+under `.cache/crash-repair/attempts/`. The supervisor appends both JSONL and
+human-readable histories. While Codex runs, its JSONL event stream, progress,
+and errors are also echoed to the terminal that launched RPLACA. RPLACA is
+relaunched only after Codex exits zero with
+`status: fixed`. The default cap is two repairs in one launch chain, preventing
+an endlessly changing crash/relaunch cycle.
+
+- `RPLACA_CRASH_REPAIR=0` disables automatic repair.
+- `RPLACA_CRASH_REPAIR_MAX_ATTEMPTS=1..10` changes the chain cap.
+- `RPLACA_CODEX_BUNDLE=/absolute/path` overrides native Codex bundle discovery.

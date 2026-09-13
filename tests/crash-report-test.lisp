@@ -43,6 +43,9 @@
 (defun crash-test-temporary-files (directory)
   (directory (merge-pathnames #P".*.tmp-*" directory)))
 
+(defun crash-test-request-files (directory)
+  (directory (merge-pathnames #P"*.request" directory)))
+
 #+sbcl
 (defun crash-test-mode (path)
   (logand #o777
@@ -146,6 +149,38 @@
             (is (= #o600 (crash-test-mode path)))
             (is (= 1 (length (crash-test-report-files directory))))
             (is (null (crash-test-temporary-files directory))))))))))
+
+(test crash-repair-request-is-private-actionable-and-redacted
+  #+sbcl
+  (with-crash-test-directory (base "repair-request")
+    (let ((directory (merge-pathnames #P"requests/" base))
+          (report (merge-pathnames #P"rplaca-crash-example.report" base))
+          (debug-log (merge-pathnames #P"debug.log" base))
+          (history (merge-pathnames #P"repair-history.md" base)))
+      (with-crash-environment
+          ("RPLACA_CRASH_REPAIR_REQUEST_DIR" (namestring directory))
+        (with-crash-environment ("RPLACA_DEBUG_LOG" (namestring debug-log))
+          (with-crash-environment
+              ("RPLACA_CRASH_REPAIR_HISTORY" (namestring history))
+            (let* ((condition
+                     (make-condition
+                      'simple-error
+                      :format-control "repair sentinel token=super-secret"))
+                   (path
+                     (rplaca::write-crash-repair-request condition report))
+                   (content (crash-test-read-file path)))
+              (is (probe-file path))
+              (is (search "schema: rplaca-crash-repair-request" content))
+              (is (search "condition-message: repair sentinel" content))
+              (is (search "token=[REDACTED]" content))
+              (is-false (search "super-secret" content))
+              (is (search (namestring report) content))
+              (is (search (namestring debug-log) content))
+              (is (search (namestring history) content))
+              (is (= #o700 (crash-test-mode directory)))
+              (is (= #o600 (crash-test-mode path)))
+              (is (= 1 (length (crash-test-request-files directory))))
+              (is (null (crash-test-temporary-files directory))))))))))
 
 (test crash-report-write-failure-publishes-no-partial-report
   (with-crash-test-directory (base "write-failure")

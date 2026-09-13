@@ -7,6 +7,10 @@ if ! command -v sbcl >/dev/null 2>&1; then
   printf '%s\n' "run-native.sh: missing sbcl on PATH" >&2
   exit 127
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '%s\n' "run-native.sh: missing python3 on PATH" >&2
+  exit 127
+fi
 
 if [ -z "${RPLACA_ULTRALISP_SETUP:-}" ]; then
   if [ -n "${RPLACA_QUICKLISP_SETUP:-}" ]; then
@@ -103,4 +107,6 @@ fi
 export RPLACA_RUN_CLEAN_BUILD
 
 cd "$SCRIPT_DIR"
-exec sbcl --dynamic-space-size "$sbcl_dynamic_space_size" --noinform --script scripts/run-ultralisp.lisp "$@"
+exec python3 scripts/crash-repair-supervisor.py --application-path-mode host -- \
+  sbcl --dynamic-space-size "$sbcl_dynamic_space_size" --noinform \
+  --script scripts/run-ultralisp.lisp "$@"

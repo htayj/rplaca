@@ -10,6 +10,7 @@
 (defconstant +crash-report-max-condition-characters+ 2048)
 (defconstant +crash-report-max-backtrace-frames+ 64)
 (defconstant +crash-report-max-threads+ 64)
+(defconstant +crash-repair-max-condition-characters+ 4096)
 
 (defvar *crash-report-frame* nil
   "The application frame active at the installed crash-report boundary.")
@@ -44,6 +45,9 @@
 (defvar *crash-report-private-write-function*
   'crash-platform-write-private-file
   "Exclusive private temporary-file writer adapter.")
+
+(defvar *crash-repair-request-emitter-function* 'write-crash-repair-request
+  "Fatal-hook repair handoff emitter, replaceable by deterministic tests.")
 
 (defun nonblank-environment-value (name)
   "Return trimmed NAME from the environment, or NIL when absent or blank."
@@ -84,6 +88,17 @@ RPLACA_CRASH_REPORT_DIR takes precedence. Otherwise use
 XDG_STATE_HOME/rplaca/crash-reports, falling back to
 ~/.local/state/rplaca/crash-reports."
   (nth-value 0 (crash-report-directory-components)))
+
+(defun crash-repair-request-directory ()
+  "Return the configured private repair-request directory, or NIL.
+
+The outer launcher sets RPLACA_CRASH_REPAIR_REQUEST_DIR only for supervised
+interactive runs.  Fatal reports remain independent of automatic repair."
+  (let ((value (nonblank-environment-value
+                "RPLACA_CRASH_REPAIR_REQUEST_DIR")))
+    (and value
+         (uiop:ensure-directory-pathname
+          (uiop:ensure-absolute-pathname (pathname value) (uiop:getcwd))))))
 
 (defun archived-legacy-crash-report-directory ()
   "Return the archival legacy crash-report directory.
@@ -442,6 +457,56 @@ or an implementation condition's arbitrary printed report."
         (unless committed-p
           (ignore-errors (delete-file temporary)))))))
 
+(defun crash-repair-request-path (report-path directory)
+  "Return the repair-request pathname paired with REPORT-PATH."
+  (merge-pathnames
+   (make-pathname :name (pathname-name report-path) :type "request")
+   directory))
+
+(defun build-crash-repair-request (condition report-path)
+  "Build a private Codex handoff containing the actionable fatal condition."
+  (with-output-to-string (stream)
+    (format stream "schema: rplaca-crash-repair-request~%")
+    (format stream "schema_version: 1~%")
+    (format stream "timestamp_utc: ~A~%" (crash-report-timestamp))
+    (write-crash-report-pair stream :report-path (namestring report-path))
+    (write-crash-report-pair stream :condition-type (type-of condition))
+    (format stream "condition-message: ~A~%"
+            (bounded-crash-string
+             condition +crash-repair-max-condition-characters+))
+    (write-crash-report-pair
+     stream :debug-log
+     (or (nonblank-environment-value "RPLACA_DEBUG_LOG") "<unavailable>"))
+    (write-crash-report-pair
+     stream :repair-history
+     (or (nonblank-environment-value "RPLACA_CRASH_REPAIR_HISTORY")
+         "<unavailable>"))))
+
+(defun write-crash-repair-request (condition report-path)
+  "Atomically publish one private repair handoff and return its pathname."
+  (let ((directory (crash-repair-request-directory)))
+    (when directory
+      (ensure-directories-exist
+       (merge-pathnames #P".repair-request-parent"
+                        (uiop:pathname-parent-directory-pathname directory)))
+      (crash-platform-ensure-private-directory directory)
+      (let* ((final (crash-repair-request-path report-path directory))
+             (temporary
+               (crash-report-temporary-path directory
+                                            (file-namestring final)))
+             (content (build-crash-repair-request condition report-path))
+             (committed-p nil))
+        (unwind-protect
+             (progn
+               (funcall *crash-report-private-write-function*
+                        temporary content)
+               (funcall *crash-report-rename-function* temporary final)
+               (crash-platform-fsync-directory directory)
+               (setf committed-p t)
+               final)
+          (unless committed-p
+            (ignore-errors (delete-file temporary))))))))
+
 (defun crash-report-invoke-debugger-hook (condition previous-hook)
   "Best-effort fatal reporter that always delegates to the captured hook."
   (declare (ignore previous-hook))
@@ -457,15 +522,23 @@ or an implementation condition's arbitrary printed report."
       (when (crash-platform-claim-report
              *crash-report-claim-state*)
         (handler-case
-            (let ((path
-                    (funcall *crash-report-emitter-function*
-                             condition
-                             :context
-                             (if *crash-report-frame* :frame :main))))
+            (let* ((path
+                     (funcall *crash-report-emitter-function*
+                              condition
+                              :context
+                              (if *crash-report-frame* :frame :main)))
+                   (repair-request
+                     (ignore-errors
+                       (funcall *crash-repair-request-emitter-function*
+                                condition path))))
               (ignore-errors
                 (format *error-output*
                         "~&RPLACA fatal crash report: ~A~%"
                         path)
+                (when repair-request
+                  (format *error-output*
+                          "RPLACA crash repair request: ~A~%"
+                          repair-request))
                 (force-output *error-output*)))
           (condition (reporter-condition)
             (declare (ignore reporter-condition))
